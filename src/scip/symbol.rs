@@ -87,6 +87,11 @@ impl<'a> Symbol<'a> {
         }))
     }
 
+    /// The Cargo package name this symbol belongs to.
+    pub fn package_name(&self) -> &str {
+        self.package.as_ref()
+    }
+
     /// What `packages`, keyed by name and version, holds for the package the
     /// symbol is in.
     pub fn package_in<T: Copy>(&self, packages: &HashMap<(&str, &str), T>) -> Option<T> {

@@ -5,6 +5,7 @@
 
 mod coupling;
 mod cycles;
+mod duplicates;
 mod functions;
 mod layout;
 mod leaks;
@@ -40,14 +41,21 @@ pub enum Lint {
     WideType,
     WideModule,
     WideStruct,
+    WideEnum,
     ScatteredImpl,
     UnusedPub,
+    TestOnlyPub,
     OverPublic,
     PassThrough,
+    ReexportSprawl,
     LongFunction,
     WideSignature,
+    StringError,
+    DuplicateCode,
     HighFanOut,
     FeatureEnvy,
+    LayerViolation,
+    UnusedDep,
     WideDirectory,
     LongFile,
 }
@@ -63,14 +71,21 @@ impl Lint {
             Lint::WideType => "wide-type",
             Lint::WideModule => "wide-module",
             Lint::WideStruct => "wide-struct",
+            Lint::WideEnum => "wide-enum",
             Lint::ScatteredImpl => "scattered-impl",
             Lint::UnusedPub => "unused-pub",
+            Lint::TestOnlyPub => "test-only-pub",
             Lint::OverPublic => "over-public",
             Lint::PassThrough => "pass-through",
+            Lint::ReexportSprawl => "reexport-sprawl",
             Lint::LongFunction => "long-function",
             Lint::WideSignature => "wide-signature",
+            Lint::StringError => "string-error",
+            Lint::DuplicateCode => "duplicate-code",
             Lint::HighFanOut => "high-fan-out",
             Lint::FeatureEnvy => "feature-envy",
+            Lint::LayerViolation => "layer-violation",
+            Lint::UnusedDep => "unused-dep",
             Lint::WideDirectory => "wide-directory",
             Lint::LongFile => "long-file",
         }
@@ -86,14 +101,21 @@ impl Lint {
             "wide-type" => Some(Lint::WideType),
             "wide-module" => Some(Lint::WideModule),
             "wide-struct" => Some(Lint::WideStruct),
+            "wide-enum" => Some(Lint::WideEnum),
             "scattered-impl" => Some(Lint::ScatteredImpl),
             "unused-pub" => Some(Lint::UnusedPub),
+            "test-only-pub" => Some(Lint::TestOnlyPub),
             "over-public" => Some(Lint::OverPublic),
             "pass-through" => Some(Lint::PassThrough),
+            "reexport-sprawl" => Some(Lint::ReexportSprawl),
             "long-function" => Some(Lint::LongFunction),
             "wide-signature" => Some(Lint::WideSignature),
+            "string-error" => Some(Lint::StringError),
+            "duplicate-code" => Some(Lint::DuplicateCode),
             "high-fan-out" => Some(Lint::HighFanOut),
             "feature-envy" => Some(Lint::FeatureEnvy),
+            "layer-violation" => Some(Lint::LayerViolation),
+            "unused-dep" => Some(Lint::UnusedDep),
             "wide-directory" => Some(Lint::WideDirectory),
             "long-file" => Some(Lint::LongFile),
             _ => None,
@@ -184,6 +206,7 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     diagnostics.extend(visibility::check(model, &graph, scope));
     diagnostics.extend(pass_through::check(model, &graph, scope));
     diagnostics.extend(functions::check(model, &graph, scope));
+    diagnostics.extend(duplicates::check(model, &graph, scope));
     diagnostics.extend(coupling::check(model, &graph, scope));
     diagnostics.extend(layout::check(model, scope));
     diagnostics.sort_by(|a, b| a.lint.cmp(&b.lint).then_with(|| a.key.cmp(&b.key)));

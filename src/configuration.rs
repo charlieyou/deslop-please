@@ -28,15 +28,15 @@ pub struct Configuration {
 impl Configuration {
     /// `--target <triple>`. Cargo takes several targets; rust-analyzer
     /// indexes one.
-    pub fn target(&mut self, triple: &str) -> Result<(), String> {
+    pub fn target(&mut self, triple: &str) -> Result<(), Error> {
         if triple.is_empty() {
-            return Err("'--target' needs a target triple".to_owned());
+            return Err(Error::new("'--target' needs a target triple"));
         }
         match &self.target {
-            Some(other) if other != triple => Err(format!(
+            Some(other) if other != triple => Err(Error::new(format!(
                 "'--target {other}' and '--target {triple}': rust-analyzer indexes one target \
                  per run, so run once for each"
-            )),
+            ))),
             _ => {
                 self.target = Some(triple.to_owned());
                 Ok(())
@@ -220,7 +220,7 @@ mod tests {
         configuration.target("aarch64-apple-darwin").unwrap();
         configuration.target("aarch64-apple-darwin").unwrap();
         let two = configuration.target("x86_64-pc-windows-msvc").unwrap_err();
-        assert!(two.contains("one target per run"), "{two}");
+        assert!(two.to_string().contains("one target per run"), "{two}");
         assert!(configuration.target("").is_err());
     }
 }

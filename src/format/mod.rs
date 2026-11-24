@@ -7,12 +7,13 @@ use std::fmt::Write;
 use std::io::IsTerminal;
 
 use crate::TOOL;
-use crate::lint::Diagnostic;
+use crate::lint::{Diagnostic, Lint};
 
 pub fn render(
     diagnostics: &[Diagnostic],
-    fixed_allowed: usize,
+    stale_allowed: &[(Lint, String)],
     allow_path: Option<&str>,
+    strict_allow: bool,
 ) -> String {
     let paint = Paint(stdout_has_color());
     let mut out = String::new();
@@ -41,6 +42,7 @@ pub fn render(
         out.push('\n');
     }
 
+    let fixed_allowed = stale_allowed.len();
     if fixed_allowed > 0
         && let Some(path) = allow_path
     {
@@ -49,22 +51,39 @@ pub fn render(
         } else {
             "entries"
         };
-        let _ = writeln!(
-            out,
-            "{} {fixed_allowed} allowed {noun} in {path} are now fixed (run `{TOOL} --update-allow {path}` to tighten it)",
-            paint.bold("note:")
-        );
+        if strict_allow {
+            let _ = writeln!(
+                out,
+                "{}: {fixed_allowed} stale allowed {noun} in {path} (run `{TOOL} --update-allow {path}` to prune)",
+                paint.error("error[stale-allow]")
+            );
+            for (lint, key) in stale_allowed.iter().take(20) {
+                let _ = writeln!(out, "  {} {} {key}", paint.gutter("-"), lint.name());
+            }
+            if fixed_allowed > 20 {
+                let _ = writeln!(
+                    out,
+                    "  {} ... and {} more",
+                    paint.gutter("-"),
+                    fixed_allowed - 20
+                );
+            }
+        } else {
+            let _ = writeln!(
+                out,
+                "{} {fixed_allowed} allowed {noun} in {path} are now fixed (run `{TOOL} --update-allow {path}` to tighten it)",
+                paint.bold("note:")
+            );
+        }
     }
 
-    if diagnostics.is_empty() {
+    let failed = !diagnostics.is_empty() || (strict_allow && fixed_allowed > 0);
+    if !failed {
         let _ = writeln!(out, "{TOOL}: {}", paint.ok("ok"));
     } else {
-        let noun = if diagnostics.len() == 1 {
-            "error"
-        } else {
-            "errors"
-        };
-        let count = format!("{} {noun}", diagnostics.len());
+        let total = diagnostics.len() + if strict_allow { fixed_allowed } else { 0 };
+        let noun = if total == 1 { "error" } else { "errors" };
+        let count = format!("{total} {noun}");
         let _ = writeln!(out, "{TOOL}: {}, well done!", paint.error(&count));
     }
     out

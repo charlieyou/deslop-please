@@ -145,6 +145,7 @@ mod tests {
             root: PathBuf::from("/w"),
             target_directory: PathBuf::from("/w/target"),
             packages: Vec::new(),
+            layers: Vec::new(),
         };
         let host = Configuration::default();
         let mut windows = Configuration::default();

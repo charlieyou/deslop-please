@@ -81,17 +81,19 @@ impl AllowList {
     }
 
     /// Allowed entries that are no longer present in `diagnostics`.
-    pub fn fixed_count(&self, diagnostics: &[Diagnostic]) -> usize {
+    pub fn stale(&self, diagnostics: &[Diagnostic]) -> Vec<(Lint, String)> {
         self.entries
             .iter()
             .filter(|(lint, key)| !diagnostics.iter().any(|d| covers(*lint, key, d)))
-            .count()
+            .cloned()
+            .collect()
     }
 }
 
 /// Whether the entry `lint key` allows `diagnostic`. Shrinking an allowed
-/// circle is an improvement, never a new error, so an entry allows every
-/// tangle or module cycle whose members are among its own.
+/// circle or duplicate group is an improvement, never a new error, so an entry
+/// allows every tangle, module cycle, or duplicate cluster whose members are
+/// among its own.
 fn covers(lint: Lint, key: &str, diagnostic: &Diagnostic) -> bool {
     if diagnostic.lint != lint {
         return false;
@@ -100,7 +102,7 @@ fn covers(lint: Lint, key: &str, diagnostic: &Diagnostic) -> bool {
         return true;
     }
     let allowed = members(key);
-    matches!(lint, Lint::Tangle | Lint::ModuleCycle)
+    matches!(lint, Lint::Tangle | Lint::ModuleCycle | Lint::DuplicateCode)
         && members(&diagnostic.key)
             .iter()
             .all(|member| allowed.contains(member))
@@ -151,8 +153,8 @@ mod tests {
         let allow = AllowList::parse("tangle a::X,a::Y,b::Z\n").unwrap();
         assert!(allow.is_allowed(&tangle("a::X,b::Z")));
         assert!(!allow.is_allowed(&tangle("a::W,a::X,a::Y,b::Z")));
-        assert_eq!(allow.fixed_count(&[tangle("a::X,a::Y")]), 0);
-        assert_eq!(allow.fixed_count(&[]), 1);
+        assert_eq!(allow.stale(&[tangle("a::X,a::Y")]).len(), 0);
+        assert_eq!(allow.stale(&[]).len(), 1);
     }
 
     #[test]

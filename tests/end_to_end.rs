@@ -826,9 +826,9 @@ fn visibility_lints_catch_unused_pub_and_over_public_in_private_crates() {
         keys(&ws),
         [
             "over-public core_lib::internal_only",
+            "test-only-pub core_lib::it_used",
+            "test-only-pub core_lib::test_only",
             "unused-pub core_lib::dead",
-            "unused-pub core_lib::it_used",
-            "unused-pub core_lib::test_only",
         ]
     );
 }
@@ -965,4 +965,127 @@ fn functions_wide_module_wide_struct_bag_and_coupling_lints_work_end_to_end() {
             "missing `{expected}` in {found:?}"
         );
     }
+}
+
+#[test]
+fn duplicate_code_string_error_wide_enum_reexport_sprawl_layers_unused_dep_and_strict_allow() {
+    let mut mega_enum = String::from("pub enum Mega {\n");
+    for i in 0..26 {
+        mega_enum.push_str(&format!("    V{i},\n"));
+    }
+    mega_enum.push_str("}\n");
+
+    let mut items_mod = String::new();
+    let mut facade_rs = String::from("mod items;\n");
+    for i in 0..16 {
+        items_mod.push_str(&format!("pub struct R{i};\n"));
+        facade_rs.push_str(&format!("pub use items::R{i};\n"));
+    }
+
+    let dup_a = "\
+pub fn calc_a(nums: &[u64], cap: u64) -> Result<u64, String> {\n\
+    let mut total = 0u64;\n\
+    for &n in nums {\n\
+        if n > 0 && n < cap {\n\
+            total = total.saturating_add(n * 3 + 1);\n\
+        } else if n >= cap {\n\
+            total = total.saturating_sub(1);\n\
+        }\n\
+    }\n\
+    if total > cap { Ok(total - cap) } else { Ok(total) }\n\
+}\n";
+    let dup_b = "\
+pub fn calc_b(values: &[u64], limit: u64) -> u64 {\n\
+    let mut sum = 0u64;\n\
+    for &n in values {\n\
+        if n > 0 && n < limit {\n\
+            sum = sum.saturating_add(n * 3 + 1);\n\
+        } else if n >= limit {\n\
+            sum = sum.saturating_sub(1);\n\
+        }\n\
+    }\n\
+    if sum > limit { sum - limit } else { sum }\n\
+}\n";
+    let dup_c = "\
+pub fn calc_c(xs: &[u64], bound: u64) -> u64 {\n\
+    let mut acc = 0u64;\n\
+    for &n in xs {\n\
+        if n > 0 && n < bound {\n\
+            acc = acc.saturating_add(n * 3 + 1);\n\
+        } else if n >= bound {\n\
+            acc = acc.saturating_sub(1);\n\
+        }\n\
+    }\n\
+    if acc > bound { acc - bound } else { acc }\n\
+}\n";
+
+    let ws = scratch_workspace(
+        "batch3_e2e",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"low\", \"high\", \"unused_dep\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "deslop-please.toml",
+                "layers = [\n  [\"low\", \"unused_dep\"],\n  [\"high\"],\n]\n",
+            ),
+            (
+                "unused_dep/Cargo.toml",
+                "[package]\nname = \"unused_dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            ("unused_dep/src/lib.rs", "pub fn noop() {}\n"),
+            (
+                "high/Cargo.toml",
+                "[package]\nname = \"high\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            ("high/src/lib.rs", "pub fn top() -> u32 { 1 }\n"),
+            (
+                "low/Cargo.toml",
+                "[package]\nname = \"low\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\nhigh = { path = \"../high\" }\nunused_dep = { path = \"../unused_dep\" }\n",
+            ),
+            (
+                "low/src/lib.rs",
+                &format!(
+                    "pub mod facade;\n{mega_enum}\n{dup_a}\n{dup_b}\n{dup_c}\n\
+                     pub fn call_high() -> u32 {{ high::top() }}\n"
+                ),
+            ),
+            ("low/src/facade/mod.rs", &facade_rs),
+            ("low/src/facade/items.rs", &items_mod),
+        ],
+    );
+    let found = keys(&ws);
+    for expected in [
+        "duplicate-code low::calc_b,low::calc_c",
+        "layer-violation low -> high",
+        "layer-violation low -> unused_dep",
+        "reexport-sprawl low::facade",
+        "string-error low::calc_a",
+        "unused-dep low::unused_dep",
+        "wide-enum low::Mega",
+    ] {
+        assert!(
+            found.iter().any(|k| k == expected),
+            "missing `{expected}` in {found:?}"
+        );
+    }
+
+    // Verify `--strict-allow` fails when allowlist contains a stale entry.
+    let allow_file = ws.join("test.allow");
+    let mut entries = found.join("\n");
+    entries.push_str("\nwide-enum low::NonExistent\n");
+    std::fs::write(&allow_file, entries).unwrap();
+    let allow_str = allow_file.to_str().unwrap();
+
+    let ok_run = run(&ws, &["--allow", allow_str]);
+    assert_eq!(ok_run.code, Some(0), "{}", ok_run.stdout);
+    let strict_run = run(&ws, &["--allow", allow_str, "--strict-allow"]);
+    assert_eq!(strict_run.code, Some(1), "{}", strict_run.stdout);
+    assert!(
+        strict_run.stdout.contains("error[stale-allow]"),
+        "{}",
+        strict_run.stdout
+    );
 }

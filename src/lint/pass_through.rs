@@ -8,18 +8,22 @@
 //!    module, or already-`pub` child module (private-child splits like
 //!    `mod parts; pub use parts::*;` are allowed).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{
-    Diagnostic, Lint, Location, Picture, in_scope, item_location, listed, without_generics,
+    Diagnostic, Lint, Location, Picture, counted, in_scope, item_location, listed, without_generics,
 };
 use crate::graph::Graph;
 use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility, Wrapper};
+
+/// The most `pub use` / `pub(...) use` declarations one module may accumulate.
+const MOST_REEXPORTS: usize = 15;
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     check_wrappers(model, graph, scope, &mut diagnostics);
     check_glob_reexports(model, scope, &mut diagnostics);
+    check_reexport_sprawl(model, scope, &mut diagnostics);
     diagnostics
 }
 
@@ -188,8 +192,13 @@ fn check_glob_reexports(model: &Model, scope: Option<NodeId>, diagnostics: &mut 
             Some(_) => "re-exports another module's entire namespace",
             None => "re-exports an external crate's entire namespace",
         };
+        let lint = if glob.restricted {
+            Lint::ReexportSprawl
+        } else {
+            Lint::PassThrough
+        };
         diagnostics.push(Diagnostic {
-            lint: Lint::PassThrough,
+            lint,
             key,
             message: format!("`{from_name}` glob re-exports `{}::*`", glob.path),
             location: Some(Location {
@@ -201,6 +210,49 @@ fn check_glob_reexports(model: &Model, scope: Option<NodeId>, diagnostics: &mut 
                 from: from_name,
                 to: format!("{}::*", glob.path),
                 detail: reason.to_owned(),
+            },
+        });
+    }
+}
+
+fn check_reexport_sprawl(model: &Model, scope: Option<NodeId>, diagnostics: &mut Vec<Diagnostic>) {
+    let tree = &model.tree;
+    let mut by_module: BTreeMap<NodeId, (usize, Option<Location>)> = BTreeMap::new();
+    for entry in &model.module_reexports {
+        if entry.test || !in_scope(tree, scope, entry.module) {
+            continue;
+        }
+        let loc = Location {
+            file: model.files[entry.file.index()].path.clone(),
+            line: entry.line,
+        };
+        let slot = by_module.entry(entry.module).or_insert((0, None));
+        slot.0 += entry.count;
+        if slot.1.as_ref().is_none_or(|prev| loc < *prev) {
+            slot.1 = Some(loc);
+        }
+    }
+    for (module, (count, location)) in by_module {
+        if count <= MOST_REEXPORTS {
+            continue;
+        }
+        let name = tree.display(module);
+        diagnostics.push(Diagnostic {
+            lint: Lint::ReexportSprawl,
+            key: name.clone(),
+            message: format!(
+                "`{name}` is a heavy re-export facade: {}, more than {MOST_REEXPORTS}",
+                counted(count, "`pub use` declaration")
+            ),
+            location,
+            notes: vec![
+                "import items from their defining modules instead of mirroring them through a barrel file"
+                    .to_owned(),
+            ],
+            picture: Picture::Bar {
+                label: "re-exports".to_owned(),
+                length: count,
+                most: MOST_REEXPORTS,
             },
         });
     }
@@ -325,6 +377,7 @@ mod tests {
                 from: root,
                 path: "parts".into(),
                 target: Some(priv_child),
+                restricted: false,
                 test: false,
             },
             GlobReexport {
@@ -333,6 +386,7 @@ mod tests {
                 from: root,
                 path: "dto".into(),
                 target: Some(pub_child),
+                restricted: false,
                 test: false,
             },
             GlobReexport {
@@ -341,10 +395,49 @@ mod tests {
                 from: root,
                 path: "other_crate".into(),
                 target: None,
+                restricted: false,
                 test: false,
             },
         ];
 
         assert_eq!(keys(&sample), ["p::dto::*", "p::other_crate::*"]);
+    }
+
+    #[test]
+    fn heavy_reexport_facade_and_restricted_glob_fire_reexport_sprawl() {
+        let mut sample = Sample::new();
+        let root = sample.module("");
+        let file = FileId::new(0);
+        sample
+            .model
+            .module_reexports
+            .push(crate::model::ModuleReexports {
+                file,
+                line: 5,
+                module: root,
+                count: MOST_REEXPORTS + 1,
+                test: false,
+            });
+        sample.model.glob_reexports.push(GlobReexport {
+            file,
+            line: 1,
+            from: root,
+            path: "other_crate".into(),
+            target: None,
+            restricted: true,
+            test: false,
+        });
+        let graph = Graph::new(&sample.model);
+        let found: Vec<(Lint, String)> = check(&sample.model, &graph, None)
+            .into_iter()
+            .map(|d| (d.lint, d.key))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (Lint::ReexportSprawl, "p::other_crate::*".into()),
+                (Lint::ReexportSprawl, "p".into()),
+            ]
+        );
     }
 }

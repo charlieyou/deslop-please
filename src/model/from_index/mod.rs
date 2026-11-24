@@ -12,13 +12,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{
-    File, FileId, GlobReexport, Item, ItemId, ItemKind, Model, NodeId, NodeKind, Reference, Tree,
-    Visibility, Wrapper,
+    CrateDep, File, FileId, GlobReexport, Item, ItemId, ItemKind, Model, ModuleReexports, NodeId,
+    NodeKind, Reference, Tree, Visibility, Wrapper,
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
 use blocks::Blocks;
-use source::{Access, GlobUse, ImplBlock, Plain, Source};
+use source::{Access, ImplBlock, Plain, PubUse, Source};
 
 pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
     let mut builder = Builder::new(workspace);
@@ -39,6 +39,7 @@ struct Builder<'a> {
     items: Vec<Item>,
     references: Vec<Reference>,
     glob_reexports: Vec<GlobReexport>,
+    module_reexports: Vec<ModuleReexports>,
     /// By the place of each reference in `references`: what its code does
     /// with what it names.
     accesses: Vec<Access>,
@@ -77,6 +78,10 @@ struct Unit<'a> {
     /// The modules its `mod` declarations declare, each with whether the
     /// declaration builds it only for tests.
     declared_modules: Vec<(NodeId, bool)>,
+    /// External/workspace package names referenced via SCIP symbols in this file.
+    scip_packages: HashSet<String>,
+    /// Distinct identifier tokens appearing in this file.
+    idents: HashSet<String>,
 }
 
 impl<'a> Builder<'a> {
@@ -88,6 +93,7 @@ impl<'a> Builder<'a> {
             items: Vec::new(),
             references: Vec::new(),
             glob_reexports: Vec::new(),
+            module_reexports: Vec::new(),
             accesses: Vec::new(),
             packages: HashMap::new(),
             target_roots: HashMap::new(),
@@ -112,6 +118,7 @@ impl<'a> Builder<'a> {
         self.mark_markers();
         let wrappers = self.wrappers();
         self.mark_lent_reads(&wrappers);
+        let crate_deps = self.collect_crate_deps();
         Model {
             tree: self.tree,
             files: self.files,
@@ -119,6 +126,9 @@ impl<'a> Builder<'a> {
             references: self.references,
             wrappers,
             glob_reexports: self.glob_reexports,
+            module_reexports: self.module_reexports,
+            crate_deps,
+            layers: self.workspace.layers.clone(),
             serde_types,
         }
     }
@@ -216,7 +226,7 @@ impl<'a> Builder<'a> {
                     .or_insert(Some((at, block)));
             }
         }
-        let unit = Unit {
+        let mut unit = Unit {
             file,
             document,
             impl_blocks: source.impl_blocks(),
@@ -225,41 +235,67 @@ impl<'a> Builder<'a> {
             holders: Blocks::new(holders),
             named_modules,
             declared_modules,
+            scip_packages: HashSet::new(),
+            idents: HashSet::new(),
         };
-        let imports = unit.source.use_declarations();
-        let globs = unit.source.glob_reexports();
+        let scan = unit.source.scan_file();
+        let mut scip_packages = HashSet::new();
         // A reference to the file's module is no name its code writes.
         let skip = usize::from(!first.definition);
         for occurrence in &document.occurrences[skip..] {
-            self.add_definition_or_reference(occurrence, &unit, module, &imports)?;
+            if let Ok(Some(sym)) = parse(occurrence.symbol) {
+                scip_packages.insert(sym.package_name().to_owned());
+            }
+            self.add_definition_or_reference(occurrence, &unit, module, &scan.imports)?;
         }
-        self.add_glob_reexports(&unit, module, &globs);
+        self.add_reexports(&unit, module, &scan.pub_uses);
+        unit.scip_packages = scip_packages;
+        unit.idents = scan.idents;
         self.units.push(unit);
         Ok(())
     }
 
-    fn add_glob_reexports(&mut self, unit: &Unit, module: NodeId, globs: &[GlobUse]) {
-        for glob in globs {
-            let from = unit.inline_modules.innermost(glob.range).unwrap_or(module);
-            let target = unit
-                .document
-                .occurrences
-                .iter()
-                .filter(|o| !o.definition && glob.range.holds(o.range))
-                .filter_map(|o| match self.symbols.get(o.symbol) {
-                    Some(&Named::Item(item)) => {
-                        self.items[item.index()].module.map(|m| (o.range.start, m))
-                    }
-                    _ => None,
-                })
-                .max_by_key(|&(start, _)| start)
-                .map(|(_, m)| m);
-            self.glob_reexports.push(GlobReexport {
+    fn add_reexports(&mut self, unit: &Unit, module: NodeId, pub_uses: &[PubUse]) {
+        let mut per_module: HashMap<NodeId, (u32, usize)> = HashMap::new();
+        for pub_use in pub_uses {
+            let from = unit
+                .inline_modules
+                .innermost(pub_use.range)
+                .unwrap_or(module);
+            let entry = per_module.entry(from).or_insert((pub_use.line, 0));
+            entry.0 = entry.0.min(pub_use.line);
+            entry.1 += 1;
+            if let Some(path) = &pub_use.glob_path {
+                let target = unit
+                    .document
+                    .occurrences
+                    .iter()
+                    .filter(|o| !o.definition && pub_use.range.holds(o.range))
+                    .filter_map(|o| match self.symbols.get(o.symbol) {
+                        Some(&Named::Item(item)) => {
+                            self.items[item.index()].module.map(|m| (o.range.start, m))
+                        }
+                        _ => None,
+                    })
+                    .max_by_key(|&(start, _)| start)
+                    .map(|(_, m)| m);
+                self.glob_reexports.push(GlobReexport {
+                    file: unit.file,
+                    line: pub_use.line,
+                    from,
+                    path: path.clone(),
+                    target,
+                    restricted: pub_use.restricted,
+                    test: false,
+                });
+            }
+        }
+        for (reexport_module, (line, count)) in per_module {
+            self.module_reexports.push(ModuleReexports {
                 file: unit.file,
-                line: glob.line,
-                from,
-                path: glob.path.clone(),
-                target,
+                line,
+                module: reexport_module,
+                count,
                 test: false,
             });
         }
@@ -636,6 +672,62 @@ impl<'a> Builder<'a> {
         for glob in &mut self.glob_reexports {
             glob.test = self.files[glob.file.index()].test || self.tree.is_test(glob.from);
         }
+        for entry in &mut self.module_reexports {
+            entry.test = self.files[entry.file.index()].test || self.tree.is_test(entry.module);
+        }
+    }
+
+    /// Collects normal `[dependencies]` per workspace package and marks each as
+    /// used when referenced by SCIP symbols, non-test source tokens, or `[features]`.
+    fn collect_crate_deps(&self) -> Vec<CrateDep> {
+        let mut pkg_scip: HashMap<NodeId, HashSet<&str>> = HashMap::new();
+        let mut pkg_idents: HashMap<NodeId, HashSet<&str>> = HashMap::new();
+        for unit in &self.units {
+            let file = &self.files[unit.file.index()];
+            if file.test || self.tree.is_test(file.module) {
+                continue;
+            }
+            let Some(pkg) = self.tree.package_of(file.module) else {
+                continue;
+            };
+            pkg_scip
+                .entry(pkg)
+                .or_default()
+                .extend(unit.scip_packages.iter().map(String::as_str));
+            pkg_idents
+                .entry(pkg)
+                .or_default()
+                .extend(unit.idents.iter().map(String::as_str));
+        }
+        let mut deps = Vec::new();
+        for package in &self.workspace.packages {
+            let Some(&pkg_node) = self
+                .packages
+                .get(&(package.name.as_str(), package.version.as_str()))
+            else {
+                continue;
+            };
+            let scip = pkg_scip.get(&pkg_node);
+            let idents = pkg_idents.get(&pkg_node);
+            for dep in &package.dependencies {
+                if !dep.normal {
+                    continue;
+                }
+                let in_scip = scip.is_some_and(|set| set.contains(dep.name.as_str()));
+                let in_idents = idents.is_some_and(|set| set.contains(dep.crate_name.as_str()));
+                let in_features = package.feature_deps.contains(&dep.name)
+                    || package.feature_deps.contains(&dep.crate_name);
+                deps.push(CrateDep {
+                    package: pkg_node,
+                    package_name: package.name.clone(),
+                    dep_name: dep.name.clone(),
+                    dep_crate: dep.crate_name.clone(),
+                    optional: dep.optional,
+                    used: in_scip || in_idents || in_features,
+                });
+            }
+        }
+        deps
     }
 
     /// The modules declared `#[cfg(test)] mod name;` or the like, whatever
@@ -791,6 +883,8 @@ mod tests {
             directory: directory.into(),
             publish: true,
             targets: Vec::new(),
+            dependencies: Vec::new(),
+            feature_deps: HashSet::new(),
         };
         let workspace = Workspace {
             root: "/w".into(),
@@ -800,6 +894,7 @@ mod tests {
                 package("lib", "crates/lib"),
                 package("app", "app"),
             ],
+            layers: Vec::new(),
         };
         let builder = Builder::new(&workspace);
         let tree = &builder.tree;

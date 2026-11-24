@@ -41,24 +41,28 @@ struct Options {
     scope: Option<String>,
     allow: Option<PathBuf>,
     update_allow: Option<PathBuf>,
+    strict_allow: bool,
     configuration: Configuration,
 }
 
 fn usage() -> String {
     format!(
         "\
-usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]
+usage: {TOOL} [crate_or_mod] [--allow <path>] [--strict-allow] [--update-allow <path>]
        [--target <triple>] [-F, --features <features>] [--all-features]
        [--no-default-features]
 
 Runs architectural lints (module-cycle, tangle, field-leak, shared-mutable-bag,
-shallow-module, wide-type, wide-module, wide-struct, scattered-impl, unused-pub,
-over-public, pass-through, long-function, wide-signature, high-fan-out,
-feature-envy, wide-directory, long-file) on the Cargo workspace.
+shallow-module, wide-type, wide-module, wide-struct, wide-enum, scattered-impl,
+unused-pub, test-only-pub, over-public, pass-through, reexport-sprawl,
+long-function, wide-signature, string-error, duplicate-code, high-fan-out,
+feature-envy, layer-violation, unused-dep, wide-directory, long-file) on the
+Cargo workspace.
 
 options:
   <crate_or_mod>               check only one crate or module (e.g. my-crate)
   --allow <path>               suppress listed existing debt; new errors still fail
+  --strict-allow               fail if `--allow` contains stale (already-fixed) entries
   --update-allow <path>        write current diagnostics to <path>
 
 configuration, as `cargo check --workspace` takes it:
@@ -80,8 +84,9 @@ A flag's value is the next word, or follows `=`: `--target=<triple>`.
 }
 
 /// The flags, and whether each takes a value. `-F` is `--features`.
-const FLAGS: [(&str, bool); 6] = [
+const FLAGS: [(&str, bool); 7] = [
     ("--allow", true),
+    ("--strict-allow", false),
     ("--update-allow", true),
     ("--target", true),
     ("--features", true),
@@ -93,11 +98,12 @@ const FLAGS: [(&str, bool); 6] = [
 /// word, or follows `=` in the flag's own (`--target=<triple>`, `-F=a,b`) or
 /// `-F` (`-Fa,b`); only `--target` and `--features` may be given more than
 /// once.
-fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
+fn parse_arguments(arguments: &[String]) -> Result<Options, Error> {
     let mut options = Options {
         scope: None,
         allow: None,
         update_allow: None,
+        strict_allow: false,
         configuration: Configuration::default(),
     };
     let mut given = Vec::new();
@@ -105,29 +111,34 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
     while let Some(word) = words.next() {
         if !word.starts_with('-') {
             if options.scope.replace(word.to_owned()).is_some() {
-                return Err(format!("unexpected argument '{word}'"));
+                return Err(Error::new(format!("unexpected argument '{word}'")));
             }
             continue;
         }
         let (flag, attached) = split_flag(word);
         let Some(&(flag, takes_value)) = FLAGS.iter().find(|(name, _)| *name == flag) else {
-            return Err(format!("unexpected argument '{word}'"));
+            return Err(Error::new(format!("unexpected argument '{word}'")));
         };
         if given.contains(&flag) && !matches!(flag, "--target" | "--features") {
-            return Err(format!("'{flag}' cannot be given more than once"));
+            return Err(Error::new(format!(
+                "'{flag}' cannot be given more than once"
+            )));
         }
         given.push(flag);
         let value = match (takes_value, attached) {
             (true, Some(value)) => value,
             (true, None) => words
                 .next_if(|next| !next.starts_with('-'))
-                .ok_or_else(|| format!("'{flag}' needs a value"))?,
-            (false, Some(value)) => return Err(format!("'{flag}' takes no value: '{value}'")),
+                .ok_or_else(|| Error::new(format!("'{flag}' needs a value")))?,
+            (false, Some(value)) => {
+                return Err(Error::new(format!("'{flag}' takes no value: '{value}'")));
+            }
             (false, None) => "",
         };
         let configuration = &mut options.configuration;
         match flag {
             "--allow" => options.allow = Some(PathBuf::from(value)),
+            "--strict-allow" => options.strict_allow = true,
             "--update-allow" => options.update_allow = Some(PathBuf::from(value)),
             "--target" => configuration.target(value)?,
             "--features" => configuration.features(value),
@@ -137,7 +148,12 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
         }
     }
     if options.allow.is_some() && options.update_allow.is_some() {
-        return Err("'--allow' and '--update-allow' cannot be given together".to_owned());
+        return Err(Error::new(
+            "'--allow' and '--update-allow' cannot be given together",
+        ));
+    }
+    if options.strict_allow && options.allow.is_none() {
+        return Err(Error::new("'--strict-allow' requires '--allow <path>'"));
     }
     Ok(options)
 }
@@ -201,21 +217,26 @@ fn run(options: Options) -> Result<bool, Error> {
         return Ok(true);
     }
 
-    let (reported, fixed_allowed, allow_shown) = match &options.allow {
+    let (reported, stale_allowed, allow_shown) = match &options.allow {
         Some(path) => {
             let allow = AllowList::read(path)?;
-            let fixed = allow.fixed_count(&all);
+            let stale = allow.stale(&all);
             let active: Vec<_> = all.into_iter().filter(|d| !allow.is_allowed(d)).collect();
-            (active, fixed, Some(path.display().to_string()))
+            (active, stale, Some(path.display().to_string()))
         }
-        None => (all, 0, None),
+        None => (all, Vec::new(), None),
     };
 
     print!(
         "{}",
-        format::render(&reported, fixed_allowed, allow_shown.as_deref())
+        format::render(
+            &reported,
+            &stale_allowed,
+            allow_shown.as_deref(),
+            options.strict_allow,
+        )
     );
-    Ok(reported.is_empty())
+    Ok(reported.is_empty() && (!options.strict_allow || stale_allowed.is_empty()))
 }
 
 fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Model, Error> {
@@ -229,7 +250,7 @@ fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Mo
 mod tests {
     use super::*;
 
-    fn parsed(words: &[&str]) -> Result<Options, String> {
+    fn parsed(words: &[&str]) -> Result<Options, Error> {
         let arguments: Vec<String> = words.iter().map(|&word| word.to_owned()).collect();
         parse_arguments(&arguments)
     }
@@ -304,7 +325,7 @@ mod tests {
             "aarch64-apple-darwin",
             "--target=x86_64-pc-windows-msvc",
         ];
-        let error = parsed(&two).err().unwrap();
+        let error = parsed(&two).err().unwrap().to_string();
         assert!(error.contains("one target per run"), "{error}");
         let same = [
             "--target",
@@ -328,6 +349,8 @@ mod tests {
             &["--no-default-features=true"],
             &["--allow", "a", "--allow", "b"],
             &["--allow", "a", "--update-allow", "b"],
+            &["--strict-allow"],
+            &["--strict-allow=true"],
             &["--release"],
             &["-p", "my-crate"],
             &["my-crate", "other-crate"],

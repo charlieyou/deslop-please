@@ -79,14 +79,29 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         if !item.trait_impl && !item.extern_abi && params > MOST_PARAMS {
             diagnostics.push(Diagnostic {
                 lint: Lint::WideSignature,
-                key,
+                key: key.clone(),
                 message: format!("`{name}` takes {params} parameters, more than {MOST_PARAMS}"),
-                location,
+                location: location.clone(),
                 notes: vec!["group related parameters into a cohesive struct".to_owned()],
                 picture: Picture::Bar {
                     label: "params".to_owned(),
                     length: params,
                     most: MOST_PARAMS,
+                },
+            });
+        }
+
+        if !item.trait_impl && !item.extern_abi && metrics.returns_string_error {
+            diagnostics.push(Diagnostic {
+                lint: Lint::StringError,
+                key: key.clone(),
+                message: format!("`{name}` returns a stringly-typed `Result<_, String>`"),
+                location,
+                notes: vec!["return a typed error enum instead of `String`".to_owned()],
+                picture: Picture::Arrow {
+                    from: key,
+                    to: "Result<_, String>".to_owned(),
+                    detail: "use a typed error enum".to_owned(),
                 },
             });
         }
@@ -116,18 +131,22 @@ mod tests {
             lines: 150,
             branches: 30,
             params: 7,
+            ..FunctionMetrics::default()
         });
         let long = sample.item(m, "long", ItemKind::Function);
         sample.model.items[long.index()].metrics = Some(FunctionMetrics {
             lines: 151,
             branches: 5,
             params: 2,
+            ..FunctionMetrics::default()
         });
         let branchy = sample.item(m, "branchy", ItemKind::Function);
         sample.model.items[branchy.index()].metrics = Some(FunctionMetrics {
             lines: 80,
             branches: 31,
             params: 8,
+            returns_string_error: true,
+            body_fingerprint: None,
         });
         assert_eq!(
             report(&sample),
@@ -135,6 +154,7 @@ mod tests {
                 (Lint::LongFunction, "p::engine::long".into()),
                 (Lint::LongFunction, "p::engine::branchy".into()),
                 (Lint::WideSignature, "p::engine::branchy".into()),
+                (Lint::StringError, "p::engine::branchy".into()),
             ]
         );
     }

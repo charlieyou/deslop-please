@@ -19,13 +19,14 @@ use crate::workspace::TargetKind;
 struct Usage {
     prod_used: bool,
     test_used: bool,
-    /// Used by another package, or by a non-library target (`bin`, `example`,
-    /// `test`, `bench`) of the same package, which Cargo compiles as an
-    /// external crate that cannot see `pub(crate)`.
-    external_to_lib: bool,
-    /// Used from outside the item's own home module (and outside its submodule
-    /// subtree for non-root modules) within the same target.
-    outside_home: bool,
+    /// Non-test usage by another package or non-library target (`bin`, `example`).
+    prod_external_to_lib: bool,
+    /// Test usage by another package or test/bench target (`tests/`, `benches/`).
+    test_external_to_lib: bool,
+    /// Non-test usage outside the item's own home module subtree within the same target.
+    prod_outside_home: bool,
+    /// Test usage outside the item's own home module subtree.
+    test_outside_home: bool,
     internal_modules: BTreeMap<NodeId, usize>,
 }
 
@@ -146,8 +147,10 @@ fn is_outside_home(
 
 fn is_over_scoped(model: &Model, id: ItemId, usage: &Usage) -> bool {
     match model.items[id.index()].visibility {
-        Visibility::Pub => !usage.prod_used || !usage.external_to_lib,
-        Visibility::Restricted => usage.prod_used && !usage.outside_home,
+        Visibility::Pub => !usage.prod_used || !usage.prod_external_to_lib,
+        Visibility::Restricted => {
+            (!usage.prod_used && usage.test_used) || (usage.prod_used && !usage.prod_outside_home)
+        }
         Visibility::Private => false,
     }
 }
@@ -172,17 +175,22 @@ fn classify(
 fn record(usage: &mut Usage, test: bool, external: bool, outside_home: bool, from: NodeId) {
     if test {
         usage.test_used = true;
+        if external {
+            usage.test_external_to_lib = true;
+        }
+        if outside_home {
+            usage.test_outside_home = true;
+        }
     } else {
         usage.prod_used = true;
-        if !external {
+        if external {
+            usage.prod_external_to_lib = true;
+        } else {
             *usage.internal_modules.entry(from).or_default() += 1;
         }
-    }
-    if external {
-        usage.external_to_lib = true;
-    }
-    if outside_home {
-        usage.outside_home = true;
+        if outside_home {
+            usage.prod_outside_home = true;
+        }
     }
 }
 
@@ -257,41 +265,100 @@ fn build_diagnostic(
 
     if item.visibility == Visibility::Restricted {
         let home_name = tree.display(home);
-        Diagnostic {
-            lint: Lint::OverPublic,
-            key: key.clone(),
-            message: format!(
-                "`{name}` is `pub(crate)`/`pub(super)` but only used inside `{home_name}`"
-            ),
-            location,
-            notes: vec![format!("narrow `{name}` to private")],
-            picture: Picture::Arrow {
-                from: key,
-                to: home_name,
-                detail: "only referenced inside its own module subtree (narrow to private)"
-                    .to_owned(),
-            },
-        }
-    } else if !usage.prod_used {
-        let reason = if usage.test_used {
-            "only used in tests"
+        if !usage.prod_used && usage.test_used {
+            Diagnostic {
+                lint: Lint::TestOnlyPub,
+                key: key.clone(),
+                message: format!(
+                    "`{name}` is `pub(crate)`/`pub(super)` but only referenced by tests"
+                ),
+                location,
+                notes: vec!["gate behind `#[cfg(test)]` or move to test support".to_owned()],
+                picture: Picture::Arrow {
+                    from: key,
+                    to: "(tests only)".to_owned(),
+                    detail: "only referenced by test code".to_owned(),
+                },
+            }
+        } else if usage.test_outside_home {
+            Diagnostic {
+                lint: Lint::TestOnlyPub,
+                key: key.clone(),
+                message: format!(
+                    "`{name}` is `pub(crate)`/`pub(super)` only for tests outside `{home_name}`"
+                ),
+                location,
+                notes: vec![format!(
+                    "all non-test callers live inside `{home_name}`; move test hooks under `#[cfg(test)]`"
+                )],
+                picture: Picture::Arrow {
+                    from: key,
+                    to: home_name,
+                    detail: "only widened outside home module for tests".to_owned(),
+                },
+            }
         } else {
-            "never referenced in the workspace"
-        };
+            Diagnostic {
+                lint: Lint::OverPublic,
+                key: key.clone(),
+                message: format!(
+                    "`{name}` is `pub(crate)`/`pub(super)` but only used inside `{home_name}`"
+                ),
+                location,
+                notes: vec![format!("narrow `{name}` to private")],
+                picture: Picture::Arrow {
+                    from: key,
+                    to: home_name,
+                    detail: "only referenced inside its own module subtree (narrow to private)"
+                        .to_owned(),
+                },
+            }
+        }
+    } else if !usage.prod_used && usage.test_used {
         Diagnostic {
-            lint: Lint::UnusedPub,
+            lint: Lint::TestOnlyPub,
             key: key.clone(),
-            message: format!("`{name}` is `pub` but has no non-test callers ({reason})"),
+            message: format!("`{name}` is `pub` but only referenced by tests"),
             location,
             notes: vec![format!("defined in private crate `{}`", tree.display(pkg))],
             picture: Picture::Arrow {
                 from: key,
-                to: "(no non-test callers)".to_owned(),
-                detail: if usage.test_used {
-                    "gate behind #[cfg(test)] or move to test support".to_owned()
-                } else {
-                    "remove dead item or narrow visibility".to_owned()
-                },
+                to: "(tests only)".to_owned(),
+                detail: "gate behind #[cfg(test)] or move to test support".to_owned(),
+            },
+        }
+    } else if !usage.prod_used {
+        Diagnostic {
+            lint: Lint::UnusedPub,
+            key: key.clone(),
+            message: format!(
+                "`{name}` is `pub` but has no non-test callers (never referenced in the workspace)"
+            ),
+            location,
+            notes: vec![format!("defined in private crate `{}`", tree.display(pkg))],
+            picture: Picture::Arrow {
+                from: key,
+                to: "(no callers)".to_owned(),
+                detail: "remove dead item or narrow visibility".to_owned(),
+            },
+        }
+    } else if usage.test_external_to_lib {
+        let pkg_name = tree.display(pkg);
+        Diagnostic {
+            lint: Lint::TestOnlyPub,
+            key: key.clone(),
+            message: format!(
+                "`{name}` is `pub` only for external tests; all non-test callers are inside `{pkg_name}`"
+            ),
+            location,
+            notes: vec![
+                "narrow to `pub(crate)` and move unit tests inline, or gate test helpers behind a test feature"
+                    .to_owned(),
+            ],
+            picture: Picture::Arrow {
+                from: key,
+                to: pkg_name,
+                detail: "external callers are exclusively tests".to_owned(),
             },
         }
     } else {
@@ -420,6 +487,43 @@ mod tests {
         assert_eq!(
             report(&sample),
             vec![(Lint::UnusedPub, "p::api::Ghost".into())]
+        );
+    }
+
+    #[test]
+    fn test_only_pub_catches_test_only_and_external_test_only_exports() {
+        let mut sample = private_sample();
+        let (api, caller) = (sample.module("api"), sample.module("caller"));
+        let only_tests = sample.item(api, "helper_for_tests", ItemKind::Function);
+        let prod_plus_ext_test = sample.item(api, "internal_plus_it", ItemKind::Function);
+        sample.model.items[only_tests.index()].visibility = Visibility::Pub;
+        sample.model.items[prod_plus_ext_test.index()].visibility = Visibility::Pub;
+
+        // Internal prod caller for `internal_plus_it`.
+        let prod_fn = sample.item(caller, "run", ItemKind::Function);
+        sample.refer(prod_fn, prod_plus_ext_test);
+
+        // Integration test target calling both.
+        let pkg = sample.module("");
+        sample.file(pkg, "tests/it.rs", 1);
+        let test_file = crate::model::FileId::new(sample.model.files.len() - 1);
+        sample.model.files[test_file.index()].target = Some(TargetKind::Test);
+        sample.model.files[test_file.index()].test = true;
+        let it_fn = sample.item(pkg, "test_it", ItemKind::Function);
+        sample.model.items[it_fn.index()].file = Some(test_file);
+        sample.refer(it_fn, only_tests);
+        sample.model.references.last_mut().unwrap().file = test_file;
+        sample.model.references.last_mut().unwrap().test = true;
+        sample.refer(it_fn, prod_plus_ext_test);
+        sample.model.references.last_mut().unwrap().file = test_file;
+        sample.model.references.last_mut().unwrap().test = true;
+
+        assert_eq!(
+            report(&sample),
+            vec![
+                (Lint::TestOnlyPub, "p::api::helper_for_tests".into()),
+                (Lint::TestOnlyPub, "p::api::internal_plus_it".into()),
+            ]
         );
     }
 }

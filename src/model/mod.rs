@@ -23,10 +23,24 @@ pub struct Model {
     pub references: Vec<Reference>,
     /// What each wrapper hands on. No chain of forwarders loops.
     pub wrappers: HashMap<ItemId, Wrapper>,
-    /// `pub use <path>::*;` glob re-exports written in the workspace.
+    /// `pub use <path>::*;` and `pub(...) use <path>::*;` glob re-exports.
     pub glob_reexports: Vec<GlobReexport>,
+    /// Per-module count of `pub use` / `pub(...) use` declarations.
+    pub module_reexports: Vec<ModuleReexports>,
+    /// Normal dependencies declared by each workspace package, with usage info.
+    pub crate_deps: Vec<CrateDep>,
+    /// Optional crate layer table from `deslop-please.toml`, ordered lowest to highest.
+    pub layers: Vec<Vec<String>>,
     /// Structs/enums deriving `Serialize` or `Deserialize`.
     pub serde_types: HashSet<ItemId>,
+}
+
+/// Normalized structural fingerprint of a function body for clone detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BodyFingerprint {
+    pub hash_a: u64,
+    pub hash_b: u64,
+    pub tokens: u32,
 }
 
 /// Structural metrics of a defined function.
@@ -35,6 +49,8 @@ pub struct FunctionMetrics {
     pub lines: u32,
     pub branches: u32,
     pub params: u16,
+    pub returns_string_error: bool,
+    pub body_fingerprint: Option<BodyFingerprint>,
 }
 
 /// An item's declared visibility, ordered from narrowest to widest.
@@ -48,7 +64,7 @@ pub enum Visibility {
     Pub,
 }
 
-/// A `pub use <path>::*;` declaration written in a module.
+/// A `pub use <path>::*;` or `pub(...) use <path>::*;` declaration written in a module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobReexport {
     pub file: FileId,
@@ -58,7 +74,30 @@ pub struct GlobReexport {
     pub path: String,
     /// The target module if it is a workspace module.
     pub target: Option<NodeId>,
+    /// True for `pub(crate)` / `pub(super)` / `pub(in ...)`, false for plain `pub`.
+    pub restricted: bool,
     pub test: bool,
+}
+
+/// Count of `pub use` / `pub(...) use` declarations written in a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleReexports {
+    pub file: FileId,
+    pub line: u32,
+    pub module: NodeId,
+    pub count: usize,
+    pub test: bool,
+}
+
+/// A normal `[dependencies]` entry of a workspace package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrateDep {
+    pub package: NodeId,
+    pub package_name: String,
+    pub dep_name: String,
+    pub dep_crate: String,
+    pub optional: bool,
+    pub used: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

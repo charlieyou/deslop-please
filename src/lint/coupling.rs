@@ -27,6 +27,8 @@ const MIN_ENVY_ITEMS: usize = 5;
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let mut diagnostics = check_fan_out(model, graph, scope);
     diagnostics.extend(check_feature_envy(model, graph, scope));
+    diagnostics.extend(check_layers(model, scope));
+    diagnostics.extend(check_unused_deps(model, scope));
     diagnostics
 }
 
@@ -194,10 +196,99 @@ fn check_feature_envy(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Ve
     diagnostics
 }
 
+fn check_layers(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    if model.layers.is_empty() {
+        return Vec::new();
+    }
+    let tree = &model.tree;
+    let mut layer_of: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, members) in model.layers.iter().enumerate() {
+        for name in members {
+            layer_of.insert(name.as_str(), index);
+        }
+    }
+    let mut diagnostics = Vec::new();
+    for dep in &model.crate_deps {
+        if !in_scope(tree, scope, dep.package) {
+            continue;
+        }
+        let pkg_crate = tree.node(dep.package).name.as_str();
+        let Some(&from_layer) = layer_of
+            .get(dep.package_name.as_str())
+            .or_else(|| layer_of.get(pkg_crate))
+        else {
+            continue;
+        };
+        let Some(&to_layer) = layer_of
+            .get(dep.dep_name.as_str())
+            .or_else(|| layer_of.get(dep.dep_crate.as_str()))
+        else {
+            continue;
+        };
+        if to_layer >= from_layer {
+            let key = format!("{} -> {}", dep.package_name, dep.dep_name);
+            let relation = if to_layer == from_layer {
+                format!("same layer ({from_layer})")
+            } else {
+                format!("higher layer ({to_layer} > {from_layer})")
+            };
+            diagnostics.push(Diagnostic {
+                lint: Lint::LayerViolation,
+                key,
+                message: format!(
+                    "`{}` (layer {from_layer}) depends on `{}` in {relation}",
+                    dep.package_name, dep.dep_name
+                ),
+                location: module_location(model, dep.package),
+                notes: vec![
+                    "dependencies must flow strictly downward to earlier layers in `deslop-please.toml`"
+                        .to_owned(),
+                ],
+                picture: Picture::Arrow {
+                    from: format!("{} (L{from_layer})", dep.package_name),
+                    to: format!("{} (L{to_layer})", dep.dep_name),
+                    detail: format!("violates layer boundary ({relation})"),
+                },
+            });
+        }
+    }
+    diagnostics
+}
+
+fn check_unused_deps(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let tree = &model.tree;
+    let mut diagnostics = Vec::new();
+    for dep in &model.crate_deps {
+        if dep.used || dep.optional || !in_scope(tree, scope, dep.package) {
+            continue;
+        }
+        let key = format!("{}::{}", dep.package_name, dep.dep_name);
+        diagnostics.push(Diagnostic {
+            lint: Lint::UnusedDep,
+            key,
+            message: format!(
+                "`{}` declares normal dependency `{}` but never references it in non-test code",
+                dep.package_name, dep.dep_name
+            ),
+            location: module_location(model, dep.package),
+            notes: vec![
+                "remove from `[dependencies]` or move to `[dev-dependencies]` if only used by tests"
+                    .to_owned(),
+            ],
+            picture: Picture::Arrow {
+                from: dep.package_name.clone(),
+                to: dep.dep_name.clone(),
+                detail: "declared in [dependencies] with no non-test reference".to_owned(),
+            },
+        });
+    }
+    diagnostics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::tests::Sample;
+    use crate::model::{CrateDep, tests::Sample};
 
     fn report(sample: &Sample) -> Vec<(Lint, String)> {
         let graph = Graph::new(&sample.model);
@@ -243,6 +334,38 @@ mod tests {
         assert_eq!(
             report(&sample),
             vec![(Lint::FeatureEnvy, "p::a::Owner::glue".into())]
+        );
+    }
+
+    #[test]
+    fn layer_violation_and_unused_dep_fire_on_crate_deps() {
+        let mut sample = Sample::new();
+        let pkg = sample.module("");
+        sample.model.layers = vec![vec!["core".into()], vec!["app".into()]];
+        sample.model.crate_deps = vec![
+            CrateDep {
+                package: pkg,
+                package_name: "core".into(),
+                dep_name: "app".into(),
+                dep_crate: "app".into(),
+                optional: false,
+                used: true,
+            },
+            CrateDep {
+                package: pkg,
+                package_name: "core".into(),
+                dep_name: "serde".into(),
+                dep_crate: "serde".into(),
+                optional: false,
+                used: false,
+            },
+        ];
+        assert_eq!(
+            report(&sample),
+            vec![
+                (Lint::LayerViolation, "core -> app".into()),
+                (Lint::UnusedDep, "core::serde".into()),
+            ]
         );
     }
 }

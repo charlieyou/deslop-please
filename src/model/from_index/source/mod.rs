@@ -5,11 +5,15 @@
 //! body computes anything.
 
 mod cfg;
+mod metrics;
 mod operators;
 mod tokens;
 mod uses;
 
+pub use metrics::PubUse;
 pub use uses::{Access, Plain};
+
+use std::collections::HashSet;
 
 use crate::model::FunctionMetrics;
 use crate::scip::{Position, Range};
@@ -47,12 +51,12 @@ pub struct Source {
     tokens: Vec<Token>,
 }
 
-/// A `pub use <path>::*;` glob re-export as written in a file.
-#[derive(Debug, PartialEq, Eq)]
-pub struct GlobUse {
-    pub range: Range,
-    pub line: u32,
-    pub path: String,
+/// File-wide syntax facts scanned once per file: `use` declaration ranges,
+/// `pub use` / `pub(...) use` re-exports, and distinct identifier tokens.
+pub struct FileScan {
+    pub imports: Vec<Range>,
+    pub pub_uses: Vec<PubUse>,
+    pub idents: HashSet<String>,
 }
 
 /// An `impl` block as its text writes it.
@@ -123,10 +127,11 @@ impl Source {
         self.range(0, self.text.len())
     }
 
-    /// Where each `use` declaration is: from its `use` to its `;`.
-    pub fn use_declarations(&self) -> Vec<Range> {
+    /// File-wide `use` declarations, `pub use` / `pub(...) use` re-exports, and
+    /// identifier tokens.
+    pub fn scan_file(&self) -> FileScan {
         let tokens = &self.tokens;
-        let mut declarations = Vec::new();
+        let mut imports = Vec::new();
         for (at, token) in tokens.iter().enumerate() {
             let precise_capture = tokens.get(at + 1).is_some_and(|next| self.is(*next, "<"));
             if !self.is(*token, "use") || precise_capture {
@@ -136,50 +141,15 @@ impl Source {
                 .iter()
                 .find(|t| self.is(**t, ";"))
                 .map_or(self.text.len(), |t| t.end);
-            declarations.push(self.range(token.start, end));
+            imports.push(self.range(token.start, end));
         }
-        declarations
-    }
-
-    /// Every plain `pub use ...::*;` glob re-export in the file.
-    pub fn glob_reexports(&self) -> Vec<GlobUse> {
-        let tokens = &self.tokens;
-        let mut globs = Vec::new();
-        for (at, token) in tokens.iter().enumerate() {
-            let precise_capture = tokens.get(at + 1).is_some_and(|next| self.is(*next, "<"));
-            if !self.is(*token, "use") || precise_capture {
-                continue;
-            }
-            // Only plain `pub use` (not `pub(crate) use` or private `use`).
-            if at == 0 || !self.is(tokens[at - 1], "pub") {
-                continue;
-            }
-            let Some(semi) = tokens[at..].iter().position(|t| self.is(*t, ";")) else {
-                continue;
-            };
-            let body = &tokens[at + 1..at + semi];
-            if !body.iter().any(|t| self.is(*t, "*")) {
-                continue;
-            }
-            let range = self.range(tokens[at - 1].start, tokens[at + semi].end);
-            let mut path = String::new();
-            for &tok in body {
-                let text = self.text(tok);
-                if text == "*" || text == "{" {
-                    break;
-                }
-                path.push_str(text);
-            }
-            let path = path.trim_end_matches("::").to_owned();
-            if !path.is_empty() {
-                globs.push(GlobUse {
-                    range,
-                    line: range.start.line + 1,
-                    path,
-                });
-            }
+        let pub_uses = metrics::pub_uses(&self.text, tokens, |start, end| self.range(start, end));
+        let idents = metrics::collect_idents(&self.text, tokens);
+        FileScan {
+            imports,
+            pub_uses,
+            idents,
         }
-        globs
     }
 
     /// Every `impl` block, in order.
@@ -222,18 +192,39 @@ impl Source {
         let first_type = self.first_param_type_in(param_tokens);
 
         let last = tokens.len().checked_sub(1)?;
-        let branches = if self.is(tokens[last], "}") {
+        let body_open = if self.is(tokens[last], "}") {
             let mut depth = 0i32;
-            let body_open = (0..=last).rev().find(|&at| {
-                match tokens[at].kind {
-                    Kind::Close => depth += 1,
-                    Kind::Open => depth -= 1,
-                    _ => {}
-                }
-                depth == 0
-            });
-            body_open.map_or(0, |bo| {
-                tokens[bo + 1..last]
+            (0..=last)
+                .rev()
+                .find(|&at| {
+                    match tokens[at].kind {
+                        Kind::Close => depth += 1,
+                        Kind::Open => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .filter(|&bo| bo > close)
+        } else {
+            None
+        };
+        let header_end = body_open.unwrap_or(tokens.len());
+        let returns_string_error = close + 1 < header_end
+            && tokens[close + 1..header_end]
+                .iter()
+                .position(|t| self.is(*t, "->"))
+                .is_some_and(|arrow| {
+                    let ret_start = close + 1 + arrow + 1;
+                    let ret_end = tokens[ret_start..header_end]
+                        .iter()
+                        .position(|t| self.is(*t, "where"))
+                        .map_or(header_end, |w| ret_start + w);
+                    metrics::returns_string_error(&self.text, &tokens[ret_start..ret_end])
+                });
+        let (branches, body_fingerprint) = match body_open {
+            Some(bo) => {
+                let body_tokens = &tokens[bo + 1..last];
+                let branches = body_tokens
                     .iter()
                     .filter(|t| {
                         matches!(
@@ -241,10 +232,11 @@ impl Source {
                             "if" | "match" | "for" | "while" | "loop" | "&&" | "||"
                         )
                     })
-                    .count() as u32
-            })
-        } else {
-            0
+                    .count() as u32;
+                let fp = metrics::body_fingerprint(&self.text, param_tokens, body_tokens);
+                (branches, fp)
+            }
+            None => (0, None),
         };
 
         let last_line = if item.end.column == 0 {
@@ -257,6 +249,8 @@ impl Source {
                 lines: last_line.saturating_sub(item.start.line),
                 branches,
                 params,
+                returns_string_error,
+                body_fingerprint,
             },
             first_type,
         ))
@@ -676,7 +670,7 @@ mod tests {
             "pub use a::{b,\n c};\nfn f() -> impl Sized + use<> { use d::e; }\n".into(),
         );
         assert_eq!(
-            source.use_declarations(),
+            source.scan_file().imports,
             [
                 Range {
                     start: at(0, 4),
@@ -785,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_reexports_only_match_plain_pub_use_with_star() {
+    fn glob_reexports_capture_plain_and_restricted_pub_use() {
         let text = "\
 use a::*;\n\
 pub(crate) use b::*;\n\
@@ -793,9 +787,22 @@ pub use c::*;\n\
 pub use d::e::*;\n\
 pub use f::{x, *};\n\
 pub use g::Item;\n";
-        let globs = Source::new(text.into()).glob_reexports();
-        let summary: Vec<(u32, &str)> = globs.iter().map(|g| (g.line, g.path.as_str())).collect();
-        assert_eq!(summary, [(3, "c"), (4, "d::e"), (5, "f")]);
+        let scan = Source::new(text.into()).scan_file();
+        let summary: Vec<(u32, bool, Option<&str>)> = scan
+            .pub_uses
+            .iter()
+            .map(|p| (p.line, p.restricted, p.glob_path.as_deref()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (2, true, Some("b")),
+                (3, false, Some("c")),
+                (4, false, Some("d::e")),
+                (5, false, Some("f")),
+                (6, false, None),
+            ]
+        );
     }
 
     #[test]
