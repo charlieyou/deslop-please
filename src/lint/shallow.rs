@@ -81,7 +81,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         if shallow && in_scope(tree, scope, module) {
             let name = tree.display(module);
             diagnostics.push(Diagnostic {
-                lint: Lint::ShallowModule,
+                lint: Lint::Encapsulation(super::EncapsulationLint::ShallowModule),
                 key: name.clone(),
                 message: format!(
                     "`{name}` is shallow: it shows {} of its {}",

@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::Error;
 use crate::model::{
     CrateDep, File, FileId, GlobReexport, Item, ItemId, ItemKind, Model, ModuleReexports, NodeId,
-    NodeKind, Reference, Tree, Visibility, Wrapper,
+    NodeKind, Reference, TraitImpl, Tree, Visibility, Wrapper,
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
@@ -109,11 +109,12 @@ impl<'a> Builder<'a> {
 
     /// The model, once every document is in.
     fn finish(mut self, index: &Index) -> Model {
-        self.read_symbol_information(index);
+        let traits = self.read_symbol_information(index);
         self.mark_test_code();
         self.place_in_types();
         self.mark_function_info();
         let serde_types = self.collect_serde_types();
+        let trait_impls = self.collect_trait_impls(&traits);
         self.mark_copies();
         self.mark_markers();
         let wrappers = self.wrappers();
@@ -130,6 +131,8 @@ impl<'a> Builder<'a> {
             crate_deps,
             layers: self.workspace.layers.clone(),
             serde_types,
+            traits,
+            trait_impls,
         }
     }
 
@@ -566,11 +569,16 @@ impl<'a> Builder<'a> {
         Some(id)
     }
 
-    fn read_symbol_information(&mut self, index: &Index) {
+    fn read_symbol_information(&mut self, index: &Index) -> HashSet<ItemId> {
+        const TRAIT: u64 = 53;
+        let mut traits = HashSet::new();
         for information in index.documents.iter().flat_map(|d| &d.symbols) {
             let Some(&Named::Item(id)) = self.symbols.get(information.symbol) else {
                 continue;
             };
+            if information.kind == TRAIT {
+                traits.insert(id);
+            }
             let item = &mut self.items[id.index()];
             if item.module.is_none() && item.kind != ItemKind::Impl {
                 item.kind = item_kind(information.kind);
@@ -584,6 +592,114 @@ impl<'a> Builder<'a> {
                 item.extern_abi |= extern_abi;
             }
         }
+        traits
+    }
+
+    /// Collects every `impl Trait for Type` block in the workspace, combining
+    /// explicit `impl` headers with SCIP `impl` symbols (for macro-generated impls).
+    fn collect_trait_impls(&self, traits: &HashSet<ItemId>) -> HashMap<ItemId, Vec<TraitImpl>> {
+        let mut by_trait: HashMap<ItemId, Vec<TraitImpl>> = HashMap::new();
+        let mut explicit_spans: HashSet<(FileId, Range)> = HashSet::new();
+
+        for unit in &self.units {
+            let file = &self.files[unit.file.index()];
+            for block in &unit.impl_blocks {
+                let Some(trait_range) = block.trait_type else {
+                    continue;
+                };
+                let Some(trait_id) = unit
+                    .document
+                    .occurrences
+                    .iter()
+                    .find(|o| !o.definition && o.range == trait_range)
+                    .and_then(|o| match self.symbols.get(o.symbol) {
+                        Some(&Named::Item(id)) if traits.contains(&id) => Some(id),
+                        _ => None,
+                    })
+                else {
+                    continue;
+                };
+                let owner = unit
+                    .inline_modules
+                    .innermost(block.block)
+                    .unwrap_or(file.module);
+                let test = file.test || self.tree.is_test(owner);
+                let local_self = block.self_type.is_some_and(|self_range| {
+                    unit.document
+                        .occurrences
+                        .iter()
+                        .find(|o| !o.definition && o.range == self_range)
+                        .is_some_and(|o| matches!(self.symbols.get(o.symbol), Some(Named::Item(_))))
+                });
+                explicit_spans.insert((unit.file, block.block));
+                by_trait.entry(trait_id).or_default().push(TraitImpl {
+                    owner,
+                    test,
+                    local_self,
+                });
+            }
+        }
+
+        // Catch macro-generated trait impls whose `impl` keyword is not written in source.
+        let mut trait_by_name: HashMap<&str, Vec<ItemId>> = HashMap::new();
+        for &id in traits {
+            trait_by_name
+                .entry(self.items[id.index()].name.as_str())
+                .or_default()
+                .push(id);
+        }
+        for (&id, place) in &self.places {
+            let Place::Impl(Impl {
+                of_trait: true,
+                is_block: true,
+                block,
+                ..
+            }) = place
+            else {
+                continue;
+            };
+            // Skip impl blocks already counted from explicit source syntax.
+            if let Some(Some((at, range))) = self.definitions.get(&id) {
+                let unit = &self.units[*at];
+                if explicit_spans
+                    .iter()
+                    .any(|&(f, r)| f == unit.file && r.holds(*range))
+                {
+                    continue;
+                }
+            }
+            let Some(trait_name) = block
+                .strip_suffix(']')
+                .and_then(|s| s.rsplit_once('['))
+                .map(|(_, name)| name)
+            else {
+                continue;
+            };
+            let item = &self.items[id.index()];
+            let test = item.file.is_some_and(|f| self.files[f.index()].test)
+                || self.tree.is_test(item.owner);
+            let local_self = item.parent.is_some();
+            if let Some(candidates) = trait_by_name.get(trait_name) {
+                let chosen = match candidates.as_slice() {
+                    [only] => Some(*only),
+                    many => {
+                        let pkg = self.tree.package_of(item.owner);
+                        many.iter()
+                            .copied()
+                            .find(|&t| self.tree.package_of(self.items[t.index()].owner) == pkg)
+                    }
+                };
+                if let Some(trait_id) = chosen {
+                    by_trait.entry(trait_id).or_default().push(TraitImpl {
+                        owner: item.owner,
+                        test,
+                        local_self,
+                    });
+                }
+            }
+        }
+
+        by_trait
     }
 
     fn module(&mut self, symbol: &Symbol, path: &[&str]) -> Option<NodeId> {

@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Diagnostic, HELD_IN_MIND, Lint, Location, Picture, clickable, counted, full_name, in_scope,
-    item_location, without_generics,
+    Diagnostic, EncapsulationLint, HELD_IN_MIND, Lint, Location, Picture, SurfaceLint, clickable,
+    counted, full_name, in_scope, item_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
-use crate::model::{ItemKind, Model, NodeId};
+use crate::model::{ItemId, ItemKind, Model, NodeId};
 
 /// The most submodules inside a type's own home subtree that may hold its
 /// inherent `impl` blocks before they are considered scattered.
@@ -23,6 +23,12 @@ struct ImplSite {
 }
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let mut diagnostics = check_scattered_impls(model, graph, scope);
+    diagnostics.extend(check_single_impl_traits(model, scope));
+    diagnostics
+}
+
+fn check_scattered_impls(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
     let mut by_type: BTreeMap<ThingId, BTreeMap<NodeId, ImplSite>> = BTreeMap::new();
     for (index, item) in model.items.iter().enumerate() {
@@ -127,7 +133,7 @@ fn diagnostic(
     };
 
     Diagnostic {
-        lint: Lint::ScatteredImpl,
+        lint: Lint::Encapsulation(EncapsulationLint::ScatteredImpl),
         key: key.clone(),
         message: format!(
             "`{type_name}` has inherent impls scattered across {}{detail}",
@@ -142,6 +148,58 @@ fn diagnostic(
             others: vec![format!("home: {}", tree.display(home))],
         },
     }
+}
+
+fn check_single_impl_traits(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let tree = &model.tree;
+    let mut traits: Vec<ItemId> = model.traits.iter().copied().collect();
+    traits.sort();
+
+    let mut diagnostics = Vec::new();
+    for id in traits {
+        let item = &model.items[id.index()];
+        if tree.is_test(item.owner) || item.file.is_some_and(|f| model.files[f.index()].test) {
+            continue;
+        }
+        let Some(pkg) = tree.package_of(item.owner) else {
+            continue;
+        };
+        if tree.node(pkg).publish || !in_scope(tree, scope, item.owner) {
+            continue;
+        }
+        let impls = model.trait_impls.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+        // Extension traits on std/external types or blanket `impl<T> Trait for T`
+        // legitimately have a single impl block.
+        if impls.iter().any(|im| !im.local_self) {
+            continue;
+        }
+        if impls.len() > 1 {
+            continue;
+        }
+        let name = without_generics(&item.name);
+        let key = format!("{}::{name}", tree.display(item.owner));
+        let detail = if impls.is_empty() {
+            "0 impls in workspace".to_owned()
+        } else {
+            format!("only 1 impl (in `{}`)", tree.display(impls[0].owner))
+        };
+        diagnostics.push(Diagnostic {
+            lint: Lint::Surface(SurfaceLint::SingleImplTrait),
+            key: key.clone(),
+            message: format!("trait `{name}` has {detail}"),
+            location: item_location(model, id),
+            notes: vec![
+                "inline the concrete type instead of maintaining a single-implementation trait"
+                    .to_owned(),
+            ],
+            picture: Picture::Arrow {
+                from: key,
+                to: "(concrete type)".to_owned(),
+                detail,
+            },
+        });
+    }
+    diagnostics
 }
 
 #[cfg(test)]
@@ -173,6 +231,50 @@ mod tests {
         // Adding an inherent impl in a sibling module scatters it.
         sample.member(store, admin, "Store::gc", ItemKind::Function);
         assert_eq!(keys(&sample), ["p::home::Store"]);
+    }
+
+    #[test]
+    fn single_impl_trait_flags_private_speculative_traits_and_spares_extensions() {
+        let mut sample = Sample::new();
+        let pkg = sample.module("");
+        sample.model.tree.node_mut(pkg).publish = false;
+        let m = sample.module("engine");
+        let solo = sample.item(m, "Solo", ItemKind::Type);
+        let ext = sample.item(m, "StrExt", ItemKind::Type);
+        let multi = sample.item(m, "Multi", ItemKind::Type);
+        sample.model.traits.extend([solo, ext, multi]);
+        sample.model.trait_impls.insert(
+            solo,
+            vec![crate::model::TraitImpl {
+                owner: m,
+                test: false,
+                local_self: true,
+            }],
+        );
+        sample.model.trait_impls.insert(
+            ext,
+            vec![crate::model::TraitImpl {
+                owner: m,
+                test: false,
+                local_self: false,
+            }],
+        );
+        sample.model.trait_impls.insert(
+            multi,
+            vec![
+                crate::model::TraitImpl {
+                    owner: m,
+                    test: false,
+                    local_self: true,
+                },
+                crate::model::TraitImpl {
+                    owner: m,
+                    test: true,
+                    local_self: true,
+                },
+            ],
+        );
+        assert_eq!(keys(&sample), ["p::engine::Solo"]);
     }
 
     #[test]

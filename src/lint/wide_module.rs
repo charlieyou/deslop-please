@@ -64,7 +64,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let mut mod_names: Vec<String> = caller_modules.iter().map(|&m| tree.display(m)).collect();
         mod_names.sort();
         diagnostics.push(Diagnostic {
-            lint: Lint::WideModule,
+            lint: Lint::Size(super::SizeLint::WideModule),
             key: name.clone(),
             message: format!(
                 "`{name}` is wide: it shows {} to outsiders, more than {MOST_SHOWN}",

@@ -98,7 +98,7 @@ fn diagnostic(model: &Model, graph: &Graph, members: &[ThingId], written: Writte
         ),
     };
     Diagnostic {
-        lint: Lint::Tangle,
+        lint: Lint::Graph(super::GraphLint::Tangle),
         key: names.join(","),
         message,
         location,

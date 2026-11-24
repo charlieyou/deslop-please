@@ -106,7 +106,7 @@ fn diagnostic(
         ),
     ];
     Diagnostic {
-        lint: Lint::WideType,
+        lint: Lint::Size(super::SizeLint::WideType),
         key,
         message: format!(
             "`{type_name}` is wide: it shows {} to outsiders, more than {MOST_SHOWN}",

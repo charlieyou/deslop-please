@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::lint::{Diagnostic, Lint};
+use crate::lint::{Diagnostic, GraphLint, HygieneLint, Lint};
 use crate::{Error, TOOL};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -102,10 +102,13 @@ fn covers(lint: Lint, key: &str, diagnostic: &Diagnostic) -> bool {
         return true;
     }
     let allowed = members(key);
-    matches!(lint, Lint::Tangle | Lint::ModuleCycle | Lint::DuplicateCode)
-        && members(&diagnostic.key)
-            .iter()
-            .all(|member| allowed.contains(member))
+    matches!(
+        lint,
+        Lint::Graph(GraphLint::Tangle | GraphLint::ModuleCycle)
+            | Lint::Hygiene(HygieneLint::DuplicateCode | HygieneLint::DuplicateStruct)
+    ) && members(&diagnostic.key)
+        .iter()
+        .all(|member| allowed.contains(member))
 }
 
 /// The members a circle's key lists. A member's own commas are inside
@@ -136,7 +139,7 @@ mod tests {
 
     fn tangle(key: &str) -> Diagnostic {
         Diagnostic {
-            lint: Lint::Tangle,
+            lint: Lint::Graph(GraphLint::Tangle),
             key: key.into(),
             message: String::new(),
             location: None,
@@ -160,7 +163,7 @@ mod tests {
     #[test]
     fn shrinking_an_allowed_module_cycle_stays_allowed() {
         let cycle = |key: &str| Diagnostic {
-            lint: Lint::ModuleCycle,
+            lint: Lint::Graph(GraphLint::ModuleCycle),
             ..tangle(key)
         };
         let allow = AllowList::parse("module-cycle a::x,a::y,a::z\n").unwrap();

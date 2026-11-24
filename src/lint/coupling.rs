@@ -11,14 +11,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Diagnostic, Lint, Picture, counted, full_name, in_scope, item_location, listed,
-    module_location, without_generics,
+    Diagnostic, EncapsulationLint, GraphLint, Lint, Picture, counted, full_name, in_scope,
+    item_location, listed, module_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
 use crate::model::{ItemId, ItemKind, Model, NodeId};
 
 /// The most distinct sibling/foreign workspace modules one module may depend on.
 const MOST_FAN_OUT: usize = 15;
+
+/// Both fan-in and fan-out at or above this threshold mark a module as a `god-hub`.
+const MIN_HUB_DEGREE: usize = 10;
 
 /// The fewest distinct member items of a single foreign type that trigger
 /// `feature-envy`.
@@ -35,6 +38,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
 fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
     let mut deps: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
+    let mut fan_in: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
     for reference in model.references.iter().filter(|r| !r.test) {
         let item = &model.items[reference.item.index()];
         if item.kind == ItemKind::Module
@@ -53,31 +57,64 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             continue;
         }
         deps.entry(from).or_default().insert(target_mod);
+        if !tree.is_within(target_mod, from) {
+            fan_in.entry(target_mod).or_default().insert(from);
+        }
     }
 
     let mut diagnostics = Vec::new();
-    for (module, targets) in deps {
-        if targets.len() <= MOST_FAN_OUT || !in_scope(tree, scope, module) {
+    for (module, targets) in &deps {
+        if !in_scope(tree, scope, *module) {
             continue;
         }
-        let name = tree.display(module);
-        let mut target_names: Vec<String> = targets.iter().map(|&t| tree.display(t)).collect();
-        target_names.sort();
-        diagnostics.push(Diagnostic {
-            lint: Lint::HighFanOut,
-            key: name.clone(),
-            message: format!(
-                "`{name}` has high fan-out: it uses {}, more than {MOST_FAN_OUT}",
-                counted(targets.len(), "module")
-            ),
-            location: module_location(model, module),
-            notes: vec![format!("depends on: {}", listed(&target_names))],
-            picture: Picture::Bar {
-                label: "uses".to_owned(),
-                length: targets.len(),
-                most: MOST_FAN_OUT,
-            },
-        });
+        let name = tree.display(*module);
+        if targets.len() > MOST_FAN_OUT {
+            let mut target_names: Vec<String> = targets.iter().map(|&t| tree.display(t)).collect();
+            target_names.sort();
+            diagnostics.push(Diagnostic {
+                lint: Lint::Graph(GraphLint::HighFanOut),
+                key: name.clone(),
+                message: format!(
+                    "`{name}` has high fan-out: it uses {}, more than {MOST_FAN_OUT}",
+                    counted(targets.len(), "module")
+                ),
+                location: module_location(model, *module),
+                notes: vec![format!("depends on: {}", listed(&target_names))],
+                picture: Picture::Bar {
+                    label: "uses".to_owned(),
+                    length: targets.len(),
+                    most: MOST_FAN_OUT,
+                },
+            });
+        }
+        if targets.len() >= MIN_HUB_DEGREE
+            && let Some(callers) = fan_in.get(module)
+            && callers.len() >= MIN_HUB_DEGREE
+        {
+            let mut caller_names: Vec<String> = callers.iter().map(|&c| tree.display(c)).collect();
+            caller_names.sort();
+            let mut target_names: Vec<String> = targets.iter().map(|&t| tree.display(t)).collect();
+            target_names.sort();
+            diagnostics.push(Diagnostic {
+                lint: Lint::Graph(GraphLint::GodHub),
+                key: name.clone(),
+                message: format!(
+                    "`{name}` is a god hub: {} depend on it and it depends on {}",
+                    counted(callers.len(), "module"),
+                    counted(targets.len(), "module"),
+                ),
+                location: module_location(model, *module),
+                notes: vec![
+                    format!("used by: {}", listed(&caller_names)),
+                    format!("depends on: {}", listed(&target_names)),
+                ],
+                picture: Picture::Bar {
+                    label: "degree".to_owned(),
+                    length: callers.len() + targets.len(),
+                    most: MIN_HUB_DEGREE * 2 - 1,
+                },
+            });
+        }
     }
     diagnostics
 }
@@ -170,7 +207,7 @@ fn check_feature_envy(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Ve
             .collect();
         member_names.sort();
         diagnostics.push(Diagnostic {
-            lint: Lint::FeatureEnvy,
+            lint: Lint::Encapsulation(EncapsulationLint::FeatureEnvy),
             key: key.clone(),
             message: format!(
                 "`{fn_name}` shows feature envy toward `{target_name}`: uses {} of it vs {} own",
@@ -233,7 +270,7 @@ fn check_layers(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
                 format!("higher layer ({to_layer} > {from_layer})")
             };
             diagnostics.push(Diagnostic {
-                lint: Lint::LayerViolation,
+                lint: Lint::Graph(GraphLint::LayerViolation),
                 key,
                 message: format!(
                     "`{}` (layer {from_layer}) depends on `{}` in {relation}",
@@ -264,7 +301,7 @@ fn check_unused_deps(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
         }
         let key = format!("{}::{}", dep.package_name, dep.dep_name);
         diagnostics.push(Diagnostic {
-            lint: Lint::UnusedDep,
+            lint: Lint::Graph(GraphLint::UnusedDep),
             key,
             message: format!(
                 "`{}` declares normal dependency `{}` but never references it in non-test code",
@@ -317,7 +354,10 @@ mod tests {
         let extra = sample.module("dep_extra");
         let extra_item = sample.item(extra, "Extra", ItemKind::Type);
         sample.refer(run, extra_item);
-        assert_eq!(report(&sample), vec![(Lint::HighFanOut, "p::hub".into())]);
+        assert_eq!(
+            report(&sample),
+            vec![(Lint::Graph(GraphLint::HighFanOut), "p::hub".into())]
+        );
     }
 
     #[test]
@@ -333,7 +373,29 @@ mod tests {
         }
         assert_eq!(
             report(&sample),
-            vec![(Lint::FeatureEnvy, "p::a::Owner::glue".into())]
+            vec![(
+                Lint::Encapsulation(EncapsulationLint::FeatureEnvy),
+                "p::a::Owner::glue".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn god_hub_flags_modules_with_high_fan_in_and_high_fan_out() {
+        let mut sample = Sample::new();
+        let hub = sample.module("hub");
+        let hub_fn = sample.item(hub, "run", ItemKind::Function);
+        for i in 0..MIN_HUB_DEGREE {
+            let dep = sample.module(&format!("dep{i}"));
+            let item = sample.item(dep, &format!("D{i}"), ItemKind::Type);
+            sample.refer(hub_fn, item);
+            let caller = sample.module(&format!("caller{i}"));
+            let cfn = sample.item(caller, "call", ItemKind::Function);
+            sample.refer(cfn, hub_fn);
+        }
+        assert_eq!(
+            report(&sample),
+            vec![(Lint::Graph(GraphLint::GodHub), "p::hub".into())]
         );
     }
 
@@ -363,8 +425,8 @@ mod tests {
         assert_eq!(
             report(&sample),
             vec![
-                (Lint::LayerViolation, "core -> app".into()),
-                (Lint::UnusedDep, "core::serde".into()),
+                (Lint::Graph(GraphLint::LayerViolation), "core -> app".into()),
+                (Lint::Graph(GraphLint::UnusedDep), "core::serde".into()),
             ]
         );
     }

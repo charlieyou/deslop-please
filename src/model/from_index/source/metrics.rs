@@ -3,10 +3,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::BodyFingerprint;
+use crate::model::{BodyFingerprint, PositionalTrap};
 use crate::scip::Range;
 
 use super::tokens::{Kind, Token};
+
+/// Minimum consecutive identical primitive parameters that trigger `positional-trap`.
+const MIN_REPEATED_PRIMITIVES: u16 = 4;
+
+/// Minimum `bool` parameters that trigger `positional-trap`.
+const MIN_BOOL_PARAMS: u16 = 2;
 
 /// Minimum body tokens required before a function is considered for clone detection.
 pub const MIN_CLONE_TOKENS: usize = 45;
@@ -341,6 +347,93 @@ pub fn collect_idents(text: &str, tokens: &[Token]) -> HashSet<String> {
         .collect()
 }
 
+/// Checks a function's parameter list for positional argument-swap hazards:
+/// 2+ `bool` parameters, or 4+ consecutive parameters of the same primitive type.
+pub fn positional_trap(text: &str, param_tokens: &[Token]) -> Option<PositionalTrap> {
+    let mut types: Vec<Option<&'static str>> = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    for (i, token) in param_tokens.iter().enumerate() {
+        match &text[token.start..token.end] {
+            "<" | "(" | "[" | "{" => depth += 1,
+            ">" | ")" | "]" | "}" => depth -= 1,
+            "," if depth == 0 => {
+                if let Some(ty) = param_primitive(text, &param_tokens[start..i]) {
+                    types.push(ty);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(ty) = param_primitive(text, &param_tokens[start..]) {
+        types.push(ty);
+    }
+
+    let bool_count = types.iter().filter(|&&t| t == Some("bool")).count() as u16;
+    if bool_count >= MIN_BOOL_PARAMS {
+        return Some(PositionalTrap::Booleans(bool_count));
+    }
+
+    let mut run_kind: Option<&'static str> = None;
+    let mut run_len = 0u16;
+    let mut best: Option<(u16, &'static str)> = None;
+    for ty in types {
+        if let Some(kind) = ty {
+            if run_kind == Some(kind) {
+                run_len = run_len.saturating_add(1);
+            } else {
+                run_kind = Some(kind);
+                run_len = 1;
+            }
+            if run_len >= MIN_REPEATED_PRIMITIVES && best.is_none_or(|(b, _)| run_len > b) {
+                best = Some((run_len, kind));
+            }
+        } else {
+            run_kind = None;
+            run_len = 0;
+        }
+    }
+    best.map(|(count, kind)| PositionalTrap::RepeatedPrimitive { count, kind })
+}
+
+/// `None` for empty / `self` parameter; `Some(Some(prim))` for a primitive type;
+/// `Some(None)` for a non-primitive parameter (breaks consecutive runs).
+fn param_primitive(text: &str, param: &[Token]) -> Option<Option<&'static str>> {
+    let colon = param.iter().position(|t| &text[t.start..t.end] == ":")?;
+    let head = &param[..colon];
+    if head.iter().any(|t| &text[t.start..t.end] == "self") {
+        return None;
+    }
+    let ty: Vec<&str> = param[colon + 1..]
+        .iter()
+        .filter(|t| t.kind != Kind::Lifetime)
+        .map(|t| &text[t.start..t.end])
+        .collect();
+    let prim = match ty.as_slice() {
+        ["bool"] => Some("bool"),
+        ["u8"] => Some("u8"),
+        ["u16"] => Some("u16"),
+        ["u32"] => Some("u32"),
+        ["u64"] => Some("u64"),
+        ["u128"] => Some("u128"),
+        ["usize"] => Some("usize"),
+        ["i8"] => Some("i8"),
+        ["i16"] => Some("i16"),
+        ["i32"] => Some("i32"),
+        ["i64"] => Some("i64"),
+        ["i128"] => Some("i128"),
+        ["isize"] => Some("isize"),
+        ["f32"] => Some("f32"),
+        ["f64"] => Some("f64"),
+        ["char"] => Some("char"),
+        ["&", "str"] => Some("&str"),
+        ["String"] => Some("String"),
+        _ => None,
+    };
+    Some(prim)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +487,27 @@ mod tests {
             fp("items: &[Row], limit: u64", body_a),
             fp("values: &[Row], cap: u64", body_c)
         );
+    }
+
+    #[test]
+    fn detects_bool_and_repeated_primitive_positional_traps() {
+        let check = |params: &str| {
+            let toks = tokens::read(params);
+            positional_trap(params, &toks)
+        };
+        assert_eq!(check("a: bool, b: u32"), None);
+        assert_eq!(
+            check("&self, a: bool, b: u32, c: bool"),
+            Some(PositionalTrap::Booleans(2))
+        );
+        assert_eq!(check("a: f32, b: f32, c: f32"), None);
+        assert_eq!(
+            check("x: f32, y: f32, z: f32, w: f32"),
+            Some(PositionalTrap::RepeatedPrimitive {
+                count: 4,
+                kind: "f32"
+            })
+        );
+        assert_eq!(check("a: f32, b: f32, sep: &Ctx, c: f32, d: f32"), None);
     }
 }

@@ -65,7 +65,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             .collect();
         names.sort();
         diagnostics.push(Diagnostic {
-            lint: Lint::WideStruct,
+            lint: Lint::Size(super::SizeLint::WideStruct),
             key,
             message: format!(
                 "`{type_name}` is wide: it holds {}, more than {MOST_FIELDS}",
@@ -121,7 +121,7 @@ fn check_enums(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagn
             .collect();
         names.sort();
         diagnostics.push(Diagnostic {
-            lint: Lint::WideEnum,
+            lint: Lint::Size(super::SizeLint::WideEnum),
             key,
             message: format!(
                 "`{type_name}` is wide: it has {}, more than {MOST_VARIANTS}",
@@ -142,6 +142,7 @@ fn check_enums(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lint::SizeLint;
     use crate::model::tests::Sample;
 
     fn report(sample: &Sample) -> Vec<(Lint, String)> {
@@ -167,7 +168,7 @@ mod tests {
         sample.member(ctx, m, "SolveCtx::f_extra", ItemKind::Field);
         assert_eq!(
             report(&sample),
-            [(Lint::WideStruct, "p::walk::SolveCtx".into())]
+            [(Lint::Size(SizeLint::WideStruct), "p::walk::SolveCtx".into())]
         );
 
         sample.model.serde_types.insert(ctx);
@@ -186,7 +187,10 @@ mod tests {
         sample.member(err, m, "MegaError::Extra", ItemKind::Variant);
         assert_eq!(
             report(&sample),
-            [(Lint::WideEnum, "p::errors::MegaError".into())]
+            [(
+                Lint::Size(SizeLint::WideEnum),
+                "p::errors::MegaError".into()
+            )]
         );
     }
 }

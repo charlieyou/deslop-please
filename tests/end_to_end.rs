@@ -1089,3 +1089,102 @@ pub fn calc_c(xs: &[u64], bound: u64) -> u64 {\n\
         strict_run.stdout
     );
 }
+
+#[test]
+fn single_impl_trait_duplicate_struct_positional_trap_god_hub_and_pub_mod_field_work_end_to_end() {
+    // Build a hub module with 10 dependencies and 10 callers.
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut lib_rs = String::from(
+        "pub mod detail;\n\
+         pub mod hub;\n\
+         pub mod shadow;\n\
+         pub struct Exposed { pub internal_field: u32, pub public_field: u32 }\n\
+         pub trait OnlyOne { fn run(&self) -> u32; }\n\
+         pub struct ImplA;\n\
+         impl OnlyOne for ImplA { fn run(&self) -> u32 { 1 } }\n\
+         pub trait StrExt { fn len2(&self) -> usize; }\n\
+         impl StrExt for str { fn len2(&self) -> usize { self.len() } }\n\
+         pub fn bool_trap(a: bool, b: bool) -> bool { a && b }\n\
+         pub fn prim_trap(a: f32, b: f32, c: f32, d: f32) -> f32 { a + b + c + d }\n\
+         pub fn use_internal(e: &Exposed) -> u32 { e.internal_field + detail::ping() }\n",
+    );
+    let mut hub_rs = String::from("pub fn hub_fn() -> u32 {\n    let mut s = 0u32;\n");
+    for i in 0..10 {
+        lib_rs.push_str(&format!("mod d{i};\nmod c{i};\n"));
+        files.push((
+            format!("core/src/d{i}.rs"),
+            format!("pub fn f() -> u32 {{ {i} }}\n"),
+        ));
+        files.push((
+            format!("core/src/c{i}.rs"),
+            "pub fn call() -> u32 { crate::hub::hub_fn() }\n".to_owned(),
+        ));
+        hub_rs.push_str(&format!("    s += crate::d{i}::f();\n"));
+    }
+    hub_rs.push_str("    s\n}\n");
+
+    files.push((
+        "Cargo.toml".into(),
+        "[workspace]\nmembers = [\"app\", \"core\"]\nresolver = \"3\"\n".into(),
+    ));
+    files.push((
+        "core/Cargo.toml".into(),
+        "[package]\nname = \"core_w\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n"
+            .into(),
+    ));
+    files.push(("core/src/lib.rs".into(), lib_rs));
+    files.push(("core/src/hub.rs".into(), hub_rs));
+    files.push((
+        "core/src/detail.rs".into(),
+        "pub struct StakesA { pub sb: u32, pub bb: u32, pub ante: u32, pub stack: u32 }\n\
+         pub fn ping() -> u32 { 1 }\n"
+            .into(),
+    ));
+    files.push((
+        "core/src/shadow.rs".into(),
+        "pub struct StakesB { pub sb: u32, pub bb: u32, pub ante: u32, pub stack: u32 }\n".into(),
+    ));
+    files.push((
+        "app/Cargo.toml".into(),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+         [dependencies]\ncore_w = { path = \"../core\" }\n"
+            .into(),
+    ));
+    files.push((
+        "app/src/main.rs".into(),
+        "fn main() {\n\
+             let e = core_w::Exposed { internal_field: 1, public_field: 2 };\n\
+             let _ = e.public_field + core_w::use_internal(&e);\n\
+             let _ = core_w::hub::hub_fn();\n\
+             let _ = core_w::bool_trap(true, false);\n\
+             let _ = core_w::prim_trap(1.0, 2.0, 3.0, 4.0);\n\
+         }\n"
+        .into(),
+    ));
+
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let ws = scratch_workspace("batch4_e2e", &refs);
+    let found = keys(&ws);
+    for expected in [
+        "duplicate-struct core_w::detail::StakesA,core_w::shadow::StakesB",
+        "god-hub core_w::hub",
+        "over-public core_w::detail",
+        "positional-trap core_w::bool_trap",
+        "positional-trap core_w::prim_trap",
+        "single-impl-trait core_w::OnlyOne",
+    ] {
+        assert!(
+            found.iter().any(|k| k == expected),
+            "missing `{expected}` in {found:?}"
+        );
+    }
+    assert!(
+        !found
+            .iter()
+            .any(|k| k == "single-impl-trait core_w::StrExt"),
+        "extension trait should not be flagged: {found:?}"
+    );
+}

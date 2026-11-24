@@ -64,7 +64,7 @@ fn holders(path: &str) -> impl Iterator<Item = (&str, &str)> {
 
 fn long_file(file: &File) -> Diagnostic {
     Diagnostic {
-        lint: Lint::LongFile,
+        lint: Lint::Size(super::SizeLint::LongFile),
         key: file.path.clone(),
         message: format!(
             "`{}` is long: it has {} lines, more than {MOST_LINES}",
@@ -122,7 +122,7 @@ fn wide_directory(model: &Model, directory: &str, members: &BTreeSet<&str>) -> D
         )
         .next();
     Diagnostic {
-        lint: Lint::WideDirectory,
+        lint: Lint::Size(super::SizeLint::WideDirectory),
         key: shown.to_owned(),
         message: format!(
             "`{shown}` is wide: it holds {} files and directories, more than {MOST_MEMBERS}",

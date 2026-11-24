@@ -180,7 +180,7 @@ fn shared_mutable_bag(
     }
     let field_list: Vec<String> = mutated_fields.into_iter().collect();
     Some(Diagnostic {
-        lint: Lint::SharedMutableBag,
+        lint: Lint::Encapsulation(super::EncapsulationLint::SharedMutableBag),
         key: key.clone(),
         message: format!(
             "`{type_name}` is a shared mutable bag: {} mutated across {}",
@@ -302,7 +302,7 @@ fn diagnostic(
         modules.push((count, format!("in {}", counted(more.len(), "more module"))));
     }
     Diagnostic {
-        lint: Lint::FieldLeak,
+        lint: Lint::Encapsulation(super::EncapsulationLint::FieldLeak),
         key: format!("{}::{field_name}", tree.display(owner.home)),
         message: format!(
             "`{field_name}` is known outside `{type_name}`: {} in {}",

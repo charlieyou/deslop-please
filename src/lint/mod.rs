@@ -33,91 +33,138 @@ pub const HELD_IN_MIND: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Lint {
+    Graph(GraphLint),
+    Encapsulation(EncapsulationLint),
+    Size(SizeLint),
+    Surface(SurfaceLint),
+    Hygiene(HygieneLint),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GraphLint {
     ModuleCycle,
     Tangle,
+    HighFanOut,
+    GodHub,
+    LayerViolation,
+    UnusedDep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EncapsulationLint {
     FieldLeak,
     SharedMutableBag,
     ShallowModule,
+    ScatteredImpl,
+    FeatureEnvy,
+    PassThrough,
+    ReexportSprawl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SizeLint {
     WideType,
     WideModule,
     WideStruct,
     WideEnum,
-    ScatteredImpl,
+    LongFunction,
+    WideSignature,
+    PositionalTrap,
+    WideDirectory,
+    LongFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SurfaceLint {
     UnusedPub,
     TestOnlyPub,
     OverPublic,
-    PassThrough,
-    ReexportSprawl,
-    LongFunction,
-    WideSignature,
+    SingleImplTrait,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HygieneLint {
     StringError,
     DuplicateCode,
-    HighFanOut,
-    FeatureEnvy,
-    LayerViolation,
-    UnusedDep,
-    WideDirectory,
-    LongFile,
+    DuplicateStruct,
 }
 
 impl Lint {
     pub fn name(self) -> &'static str {
         match self {
-            Lint::ModuleCycle => "module-cycle",
-            Lint::Tangle => "tangle",
-            Lint::FieldLeak => "field-leak",
-            Lint::SharedMutableBag => "shared-mutable-bag",
-            Lint::ShallowModule => "shallow-module",
-            Lint::WideType => "wide-type",
-            Lint::WideModule => "wide-module",
-            Lint::WideStruct => "wide-struct",
-            Lint::WideEnum => "wide-enum",
-            Lint::ScatteredImpl => "scattered-impl",
-            Lint::UnusedPub => "unused-pub",
-            Lint::TestOnlyPub => "test-only-pub",
-            Lint::OverPublic => "over-public",
-            Lint::PassThrough => "pass-through",
-            Lint::ReexportSprawl => "reexport-sprawl",
-            Lint::LongFunction => "long-function",
-            Lint::WideSignature => "wide-signature",
-            Lint::StringError => "string-error",
-            Lint::DuplicateCode => "duplicate-code",
-            Lint::HighFanOut => "high-fan-out",
-            Lint::FeatureEnvy => "feature-envy",
-            Lint::LayerViolation => "layer-violation",
-            Lint::UnusedDep => "unused-dep",
-            Lint::WideDirectory => "wide-directory",
-            Lint::LongFile => "long-file",
+            Lint::Graph(g) => match g {
+                GraphLint::ModuleCycle => "module-cycle",
+                GraphLint::Tangle => "tangle",
+                GraphLint::HighFanOut => "high-fan-out",
+                GraphLint::GodHub => "god-hub",
+                GraphLint::LayerViolation => "layer-violation",
+                GraphLint::UnusedDep => "unused-dep",
+            },
+            Lint::Encapsulation(e) => match e {
+                EncapsulationLint::FieldLeak => "field-leak",
+                EncapsulationLint::SharedMutableBag => "shared-mutable-bag",
+                EncapsulationLint::ShallowModule => "shallow-module",
+                EncapsulationLint::ScatteredImpl => "scattered-impl",
+                EncapsulationLint::FeatureEnvy => "feature-envy",
+                EncapsulationLint::PassThrough => "pass-through",
+                EncapsulationLint::ReexportSprawl => "reexport-sprawl",
+            },
+            Lint::Size(s) => match s {
+                SizeLint::WideType => "wide-type",
+                SizeLint::WideModule => "wide-module",
+                SizeLint::WideStruct => "wide-struct",
+                SizeLint::WideEnum => "wide-enum",
+                SizeLint::LongFunction => "long-function",
+                SizeLint::WideSignature => "wide-signature",
+                SizeLint::PositionalTrap => "positional-trap",
+                SizeLint::WideDirectory => "wide-directory",
+                SizeLint::LongFile => "long-file",
+            },
+            Lint::Surface(s) => match s {
+                SurfaceLint::UnusedPub => "unused-pub",
+                SurfaceLint::TestOnlyPub => "test-only-pub",
+                SurfaceLint::OverPublic => "over-public",
+                SurfaceLint::SingleImplTrait => "single-impl-trait",
+            },
+            Lint::Hygiene(h) => match h {
+                HygieneLint::StringError => "string-error",
+                HygieneLint::DuplicateCode => "duplicate-code",
+                HygieneLint::DuplicateStruct => "duplicate-struct",
+            },
         }
     }
 
     pub fn parse(name: &str) -> Option<Lint> {
         match name {
-            "module-cycle" => Some(Lint::ModuleCycle),
-            "tangle" => Some(Lint::Tangle),
-            "field-leak" => Some(Lint::FieldLeak),
-            "shared-mutable-bag" => Some(Lint::SharedMutableBag),
-            "shallow-module" => Some(Lint::ShallowModule),
-            "wide-type" => Some(Lint::WideType),
-            "wide-module" => Some(Lint::WideModule),
-            "wide-struct" => Some(Lint::WideStruct),
-            "wide-enum" => Some(Lint::WideEnum),
-            "scattered-impl" => Some(Lint::ScatteredImpl),
-            "unused-pub" => Some(Lint::UnusedPub),
-            "test-only-pub" => Some(Lint::TestOnlyPub),
-            "over-public" => Some(Lint::OverPublic),
-            "pass-through" => Some(Lint::PassThrough),
-            "reexport-sprawl" => Some(Lint::ReexportSprawl),
-            "long-function" => Some(Lint::LongFunction),
-            "wide-signature" => Some(Lint::WideSignature),
-            "string-error" => Some(Lint::StringError),
-            "duplicate-code" => Some(Lint::DuplicateCode),
-            "high-fan-out" => Some(Lint::HighFanOut),
-            "feature-envy" => Some(Lint::FeatureEnvy),
-            "layer-violation" => Some(Lint::LayerViolation),
-            "unused-dep" => Some(Lint::UnusedDep),
-            "wide-directory" => Some(Lint::WideDirectory),
-            "long-file" => Some(Lint::LongFile),
+            "module-cycle" => Some(Lint::Graph(GraphLint::ModuleCycle)),
+            "tangle" => Some(Lint::Graph(GraphLint::Tangle)),
+            "high-fan-out" => Some(Lint::Graph(GraphLint::HighFanOut)),
+            "god-hub" => Some(Lint::Graph(GraphLint::GodHub)),
+            "layer-violation" => Some(Lint::Graph(GraphLint::LayerViolation)),
+            "unused-dep" => Some(Lint::Graph(GraphLint::UnusedDep)),
+            "field-leak" => Some(Lint::Encapsulation(EncapsulationLint::FieldLeak)),
+            "shared-mutable-bag" => Some(Lint::Encapsulation(EncapsulationLint::SharedMutableBag)),
+            "shallow-module" => Some(Lint::Encapsulation(EncapsulationLint::ShallowModule)),
+            "scattered-impl" => Some(Lint::Encapsulation(EncapsulationLint::ScatteredImpl)),
+            "feature-envy" => Some(Lint::Encapsulation(EncapsulationLint::FeatureEnvy)),
+            "pass-through" => Some(Lint::Encapsulation(EncapsulationLint::PassThrough)),
+            "reexport-sprawl" => Some(Lint::Encapsulation(EncapsulationLint::ReexportSprawl)),
+            "wide-type" => Some(Lint::Size(SizeLint::WideType)),
+            "wide-module" => Some(Lint::Size(SizeLint::WideModule)),
+            "wide-struct" => Some(Lint::Size(SizeLint::WideStruct)),
+            "wide-enum" => Some(Lint::Size(SizeLint::WideEnum)),
+            "long-function" => Some(Lint::Size(SizeLint::LongFunction)),
+            "wide-signature" => Some(Lint::Size(SizeLint::WideSignature)),
+            "positional-trap" => Some(Lint::Size(SizeLint::PositionalTrap)),
+            "wide-directory" => Some(Lint::Size(SizeLint::WideDirectory)),
+            "long-file" => Some(Lint::Size(SizeLint::LongFile)),
+            "unused-pub" => Some(Lint::Surface(SurfaceLint::UnusedPub)),
+            "test-only-pub" => Some(Lint::Surface(SurfaceLint::TestOnlyPub)),
+            "over-public" => Some(Lint::Surface(SurfaceLint::OverPublic)),
+            "single-impl-trait" => Some(Lint::Surface(SurfaceLint::SingleImplTrait)),
+            "string-error" => Some(Lint::Hygiene(HygieneLint::StringError)),
+            "duplicate-code" => Some(Lint::Hygiene(HygieneLint::DuplicateCode)),
+            "duplicate-struct" => Some(Lint::Hygiene(HygieneLint::DuplicateStruct)),
             _ => None,
         }
     }

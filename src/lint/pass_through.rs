@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use super::{
-    Diagnostic, Lint, Location, Picture, counted, in_scope, item_location, listed, without_generics,
+    Diagnostic, EncapsulationLint, Lint, Location, Picture, counted, in_scope, item_location,
+    listed, without_generics,
 };
 use crate::graph::Graph;
 use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility, Wrapper};
@@ -84,7 +85,7 @@ fn check_wrappers(
                         .collect();
                     let target = listed(&field_names);
                     diagnostics.push(Diagnostic {
-                        lint: Lint::PassThrough,
+                        lint: Lint::Encapsulation(EncapsulationLint::PassThrough),
                         key: key.clone(),
                         message: format!(
                             "`{name}` is a redundant accessor: `{target}` is already exposed"
@@ -138,7 +139,7 @@ fn check_wrappers(
                     "forwards through an already-exposed field".to_owned()
                 };
                 diagnostics.push(Diagnostic {
-                    lint: Lint::PassThrough,
+                    lint: Lint::Encapsulation(EncapsulationLint::PassThrough),
                     key: key.clone(),
                     message: format!("`{name}` is a pass-through to `{target_name}`"),
                     location: item_location(model, func),
@@ -193,9 +194,9 @@ fn check_glob_reexports(model: &Model, scope: Option<NodeId>, diagnostics: &mut 
             None => "re-exports an external crate's entire namespace",
         };
         let lint = if glob.restricted {
-            Lint::ReexportSprawl
+            Lint::Encapsulation(EncapsulationLint::ReexportSprawl)
         } else {
-            Lint::PassThrough
+            Lint::Encapsulation(EncapsulationLint::PassThrough)
         };
         diagnostics.push(Diagnostic {
             lint,
@@ -238,7 +239,7 @@ fn check_reexport_sprawl(model: &Model, scope: Option<NodeId>, diagnostics: &mut
         }
         let name = tree.display(module);
         diagnostics.push(Diagnostic {
-            lint: Lint::ReexportSprawl,
+            lint: Lint::Encapsulation(EncapsulationLint::ReexportSprawl),
             key: name.clone(),
             message: format!(
                 "`{name}` is a heavy re-export facade: {}, more than {MOST_REEXPORTS}",
@@ -435,8 +436,14 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                (Lint::ReexportSprawl, "p::other_crate::*".into()),
-                (Lint::ReexportSprawl, "p".into()),
+                (
+                    Lint::Encapsulation(EncapsulationLint::ReexportSprawl),
+                    "p::other_crate::*".into(),
+                ),
+                (
+                    Lint::Encapsulation(EncapsulationLint::ReexportSprawl),
+                    "p".into(),
+                ),
             ]
         );
     }

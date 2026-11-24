@@ -59,6 +59,13 @@ pub struct FileScan {
     pub idents: HashSet<String>,
 }
 
+/// Parsed pieces of an `impl` block header before its `{`.
+struct ImplHeader<'a> {
+    trait_type: Option<&'a [Token]>,
+    self_type: &'a [Token],
+    open: usize,
+}
+
 /// An `impl` block as its text writes it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ImplBlock {
@@ -67,6 +74,9 @@ pub struct ImplBlock {
     /// The name of the type it is for, past `&`, `Box<..>` and the like:
     /// `Ready` in `impl Display for &Ready`. `None` for a tuple, slice or array.
     pub self_type: Option<Range>,
+    /// For a trait `impl`, the name of the trait before `for`: `Display` in
+    /// `impl fmt::Display for &Ready`. `None` for an inherent `impl`.
+    pub trait_type: Option<Range>,
 }
 
 /// What a function's text says about it.
@@ -160,14 +170,18 @@ impl Source {
             if !self.is(*token, "impl") || !self.starts_item(at) {
                 continue;
             }
-            let Some((self_type, open)) = self.impl_header(at + 1) else {
+            let Some(header) = self.impl_header(at + 1) else {
                 continue;
             };
-            let close = self.matching(open).unwrap_or(tokens.len() - 1);
+            let close = self.matching(header.open).unwrap_or(tokens.len() - 1);
             blocks.push(ImplBlock {
                 block: self.range(token.start, tokens[close].end),
                 self_type: self
-                    .name_of(self_type)
+                    .name_of(header.self_type)
+                    .map(|name| self.range(name.start, name.end)),
+                trait_type: header
+                    .trait_type
+                    .and_then(|slice| self.name_of(slice))
                     .map(|name| self.range(name.start, name.end)),
             });
         }
@@ -190,6 +204,7 @@ impl Source {
         let param_tokens = &tokens[open + 1..close];
         let params = self.count_non_self_params(param_tokens);
         let first_type = self.first_param_type_in(param_tokens);
+        let positional_trap = metrics::positional_trap(&self.text, param_tokens);
 
         let last = tokens.len().checked_sub(1)?;
         let body_open = if self.is(tokens[last], "}") {
@@ -251,6 +266,7 @@ impl Source {
                 params,
                 returns_string_error,
                 body_fingerprint,
+                positional_trap,
             },
             first_type,
         ))
@@ -483,13 +499,14 @@ impl Source {
         before.is_none_or(|t| ["{", "}", ";", "]"].contains(&self.text(*t)))
     }
 
-    /// The tokens of an `impl` header's self type, and where its block opens.
-    fn impl_header(&self, mut at: usize) -> Option<(&[Token], usize)> {
+    /// The tokens of an `impl` header's optional trait, its self type, and where its block opens.
+    fn impl_header(&self, mut at: usize) -> Option<ImplHeader<'_>> {
         let tokens = &self.tokens;
         if tokens.get(at).is_some_and(|t| self.is(*t, "<")) {
             at = self.past_angles(at)?;
         }
         let start = at;
+        let mut trait_end = None;
         let mut self_type = start;
         let mut end = None;
         let mut depth = 0i32;
@@ -500,13 +517,19 @@ impl Source {
                 ";" => return None,
                 "{" if depth == 0 => {
                     let type_end = end.unwrap_or(index);
-                    return Some((&tokens[self_type..type_end], index));
+                    let trait_type = trait_end.map(|te| &tokens[start..te]);
+                    return Some(ImplHeader {
+                        trait_type,
+                        self_type: &tokens[self_type..type_end],
+                        open: index,
+                    });
                 }
                 "for"
                     if depth == 0
                         && end.is_none()
                         && !tokens.get(index + 1).is_some_and(|t| self.is(*t, "<")) =>
                 {
+                    trait_end = Some(index);
                     self_type = index + 1;
                 }
                 "where" if depth == 0 => end = Some(index),
@@ -703,6 +726,10 @@ mod tests {
                         start: at(2, 56),
                         end: at(2, 61)
                     }),
+                    trait_type: Some(Range {
+                        start: at(2, 29),
+                        end: at(2, 36)
+                    }),
                 },
                 ImplBlock {
                     block: Range {
@@ -710,6 +737,10 @@ mod tests {
                         end: at(4, 32)
                     },
                     self_type: None,
+                    trait_type: Some(Range {
+                        start: at(4, 12),
+                        end: at(4, 16)
+                    }),
                 },
             ]
         );

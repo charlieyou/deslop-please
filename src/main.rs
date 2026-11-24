@@ -54,10 +54,10 @@ usage: {TOOL} [crate_or_mod] [--allow <path>] [--strict-allow] [--update-allow <
 
 Runs architectural lints (module-cycle, tangle, field-leak, shared-mutable-bag,
 shallow-module, wide-type, wide-module, wide-struct, wide-enum, scattered-impl,
-unused-pub, test-only-pub, over-public, pass-through, reexport-sprawl,
-long-function, wide-signature, string-error, duplicate-code, high-fan-out,
-feature-envy, layer-violation, unused-dep, wide-directory, long-file) on the
-Cargo workspace.
+unused-pub, test-only-pub, over-public, single-impl-trait, pass-through,
+reexport-sprawl, long-function, wide-signature, positional-trap, string-error,
+duplicate-code, duplicate-struct, high-fan-out, god-hub, feature-envy,
+layer-violation, unused-dep, wide-directory, long-file) on the Cargo workspace.
 
 options:
   <crate_or_mod>               check only one crate or module (e.g. my-crate)

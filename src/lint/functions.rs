@@ -1,9 +1,12 @@
 //! `long-function` and `wide-signature`: ratchetable complexity ceilings on
 //! individual functions that cannot be bypassed by inline `#[allow(...)]`.
 
-use super::{Diagnostic, HELD_IN_MIND, Lint, Picture, in_scope, item_location, without_generics};
+use super::{
+    Diagnostic, HELD_IN_MIND, HygieneLint, Lint, Picture, SizeLint, in_scope, item_location,
+    without_generics,
+};
 use crate::graph::Graph;
-use crate::model::{ItemId, ItemKind, Model, NodeId};
+use crate::model::{ItemId, ItemKind, Model, NodeId, PositionalTrap};
 
 /// The most lines one non-test function may span before it wants splitting.
 const MOST_LINES: usize = 150;
@@ -62,7 +65,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                 )
             };
             diagnostics.push(Diagnostic {
-                lint: Lint::LongFunction,
+                lint: Lint::Size(SizeLint::LongFunction),
                 key: key.clone(),
                 message,
                 location: location.clone(),
@@ -78,7 +81,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let params = metrics.params as usize;
         if !item.trait_impl && !item.extern_abi && params > MOST_PARAMS {
             diagnostics.push(Diagnostic {
-                lint: Lint::WideSignature,
+                lint: Lint::Size(SizeLint::WideSignature),
                 key: key.clone(),
                 message: format!("`{name}` takes {params} parameters, more than {MOST_PARAMS}"),
                 location: location.clone(),
@@ -91,9 +94,43 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             });
         }
 
+        if !item.trait_impl
+            && !item.extern_abi
+            && let Some(trap) = metrics.positional_trap
+        {
+            let (message, note, label, length, most) = match trap {
+                PositionalTrap::Booleans(count) => (
+                    format!("`{name}` takes {count} `bool` parameters (positional flag trap)"),
+                    "replace boolean flags with named enums or an options struct".to_owned(),
+                    "bools",
+                    count as usize,
+                    1usize,
+                ),
+                PositionalTrap::RepeatedPrimitive { count, kind } => (
+                    format!("`{name}` takes {count} consecutive `{kind}` parameters"),
+                    format!("group adjacent `{kind}` parameters into a named struct or newtypes"),
+                    kind,
+                    count as usize,
+                    3usize,
+                ),
+            };
+            diagnostics.push(Diagnostic {
+                lint: Lint::Size(SizeLint::PositionalTrap),
+                key: key.clone(),
+                message,
+                location: location.clone(),
+                notes: vec![note],
+                picture: Picture::Bar {
+                    label: label.to_owned(),
+                    length,
+                    most,
+                },
+            });
+        }
+
         if !item.trait_impl && !item.extern_abi && metrics.returns_string_error {
             diagnostics.push(Diagnostic {
-                lint: Lint::StringError,
+                lint: Lint::Hygiene(HygieneLint::StringError),
                 key: key.clone(),
                 message: format!("`{name}` returns a stringly-typed `Result<_, String>`"),
                 location,
@@ -147,14 +184,28 @@ mod tests {
             params: 8,
             returns_string_error: true,
             body_fingerprint: None,
+            positional_trap: Some(PositionalTrap::Booleans(2)),
         });
         assert_eq!(
             report(&sample),
             vec![
-                (Lint::LongFunction, "p::engine::long".into()),
-                (Lint::LongFunction, "p::engine::branchy".into()),
-                (Lint::WideSignature, "p::engine::branchy".into()),
-                (Lint::StringError, "p::engine::branchy".into()),
+                (Lint::Size(SizeLint::LongFunction), "p::engine::long".into()),
+                (
+                    Lint::Size(SizeLint::LongFunction),
+                    "p::engine::branchy".into()
+                ),
+                (
+                    Lint::Size(SizeLint::WideSignature),
+                    "p::engine::branchy".into()
+                ),
+                (
+                    Lint::Size(SizeLint::PositionalTrap),
+                    "p::engine::branchy".into()
+                ),
+                (
+                    Lint::Hygiene(HygieneLint::StringError),
+                    "p::engine::branchy".into()
+                ),
             ]
         );
     }

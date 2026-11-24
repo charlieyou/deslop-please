@@ -84,7 +84,7 @@ fn diagnostic(
     let mut notes = vec![format!("members: {}", listed(&names))];
     notes.extend(ties);
     Diagnostic {
-        lint: Lint::ModuleCycle,
+        lint: Lint::Graph(super::GraphLint::ModuleCycle),
         key: keys.join(","),
         message: format!(
             "{} in `{}` use each other in a circle",

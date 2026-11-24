@@ -6,10 +6,11 @@
 //! `over-public` finds `pub` items that are only ever used inside their own
 //! library target and can be narrowed to `pub(crate)`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
-    Diagnostic, HELD_IN_MIND, Lint, Picture, counted, in_scope, item_location, without_generics,
+    Diagnostic, HELD_IN_MIND, Lint, Picture, SurfaceLint, counted, in_scope, item_location,
+    module_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
 use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility};
@@ -30,10 +31,58 @@ struct Usage {
     internal_modules: BTreeMap<NodeId, usize>,
 }
 
+struct AccessSite {
+    test: bool,
+    external: bool,
+    outside_home: bool,
+    from: NodeId,
+}
+
+struct UsageTables {
+    item_usage: Vec<Usage>,
+    thing_usage: Vec<Usage>,
+    mod_usage: HashMap<NodeId, Usage>,
+    non_empty_mods: HashSet<NodeId>,
+}
+
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let tables = collect_usage(model, graph);
+    let candidates: Vec<(ItemId, NodeId)> = (0..model.items.len())
+        .filter_map(|index| {
+            let id = ItemId::new(index);
+            let pkg = qualifying_package(model, id)?;
+            Some((id, pkg))
+        })
+        .collect();
+
+    let mut diagnostics = check_modules(model, &candidates, &tables, scope);
+    diagnostics.extend(check_items(model, graph, &candidates, &tables, scope));
+    diagnostics
+}
+
+fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
     let tree = &model.tree;
     let mut item_usage: Vec<Usage> = (0..model.items.len()).map(|_| Usage::default()).collect();
     let mut thing_usage: Vec<Usage> = (0..graph.things.len()).map(|_| Usage::default()).collect();
+    let mut mod_usage: HashMap<NodeId, Usage> = HashMap::new();
+    let mut non_empty_mods: HashSet<NodeId> = HashSet::new();
+
+    for item in &model.items {
+        if item.kind != ItemKind::Module
+            && !tree.is_test(item.owner)
+            && item.file.is_none_or(|f| !model.files[f.index()].test)
+            && let Some(pkg) = tree.package_of(item.owner)
+        {
+            let mut cur = Some(item.owner);
+            while let Some(node) = cur {
+                if node == pkg {
+                    break;
+                }
+                non_empty_mods.insert(node);
+                cur = tree.parent(node);
+            }
+        }
+    }
 
     for reference in &model.references {
         let target = reference.item;
@@ -48,15 +97,41 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         // Item-level usage (ignore direct self-recursion).
         if reference.holder != Some(target) {
             let item_home = home_of(model, graph, target);
-            let outside =
+            let outside_home =
                 !same_target || is_outside_home(tree, reference.from, item_home, target_pkg);
             record(
                 &mut item_usage[target.index()],
-                reference.test,
-                external,
-                outside,
-                reference.from,
+                AccessSite {
+                    test: reference.test,
+                    external,
+                    outside_home,
+                    from: reference.from,
+                },
             );
+            // Attribute usage up through containing modules in the same package.
+            let mod_start = target_item.module.unwrap_or(item_home);
+            if let Some(pkg) = target_pkg {
+                let mut cur = Some(mod_start);
+                while let Some(node) = cur {
+                    if node == pkg {
+                        break;
+                    }
+                    let mod_outside =
+                        !same_target || is_outside_home(tree, reference.from, node, Some(pkg));
+                    if mod_outside || external {
+                        record(
+                            mod_usage.entry(node).or_default(),
+                            AccessSite {
+                                test: reference.test,
+                                external,
+                                outside_home: mod_outside,
+                                from: reference.from,
+                            },
+                        );
+                    }
+                    cur = tree.parent(node);
+                }
+            }
         }
 
         // Thing-level usage (for types: any external reference to the type or
@@ -67,36 +142,90 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                 .and_then(|holder| graph.thing_of[holder.index()]);
             if holder_thing != Some(target_thing) {
                 let thing_home = graph.things[target_thing.index()].home;
-                let outside =
+                let outside_home =
                     !same_target || is_outside_home(tree, reference.from, thing_home, target_pkg);
                 record(
                     &mut thing_usage[target_thing.index()],
-                    reference.test,
-                    external,
-                    outside,
-                    reference.from,
+                    AccessSite {
+                        test: reference.test,
+                        external,
+                        outside_home,
+                        from: reference.from,
+                    },
                 );
             }
         }
     }
 
-    let candidates: Vec<(ItemId, NodeId)> = (0..model.items.len())
-        .filter_map(|index| {
-            let id = ItemId::new(index);
-            let pkg = qualifying_package(model, id)?;
-            Some((id, pkg))
+    UsageTables {
+        item_usage,
+        thing_usage,
+        mod_usage,
+        non_empty_mods,
+    }
+}
+
+fn check_modules(
+    model: &Model,
+    candidates: &[(ItemId, NodeId)],
+    tables: &UsageTables,
+    scope: Option<NodeId>,
+) -> Vec<Diagnostic> {
+    let tree = &model.tree;
+    let mut mod_candidates: Vec<(u32, NodeId, ItemId, NodeId)> = candidates
+        .iter()
+        .filter_map(|&(id, pkg)| {
+            let item = &model.items[id.index()];
+            if item.kind != ItemKind::Module || item.visibility != Visibility::Pub {
+                return None;
+            }
+            let module = item.module?;
+            if module == pkg || !tables.non_empty_mods.contains(&module) {
+                return None;
+            }
+            Some((tree.node(module).depth, module, id, pkg))
         })
         .collect();
+    mod_candidates.sort_by_key(|&(depth, module, _, _)| (depth, module));
+    mod_candidates.dedup_by_key(|&mut (_, module, _, _)| module);
 
-    // First pass: find types that are themselves `unused-pub` or `over-public`
-    // so we don't also emit redundant findings on every one of their methods.
+    let mut suppressed_mods: HashSet<NodeId> = HashSet::new();
+    let mut diagnostics = Vec::new();
+    let empty_usage = Usage::default();
+    for (_, module, id, pkg) in mod_candidates {
+        if tree
+            .ancestors(module)
+            .any(|anc| suppressed_mods.contains(&anc))
+        {
+            suppressed_mods.insert(module);
+            continue;
+        }
+        let usage = tables.mod_usage.get(&module).unwrap_or(&empty_usage);
+        if is_over_scoped(model, id, usage) {
+            suppressed_mods.insert(module);
+            if in_scope(tree, scope, module) {
+                diagnostics.push(build_module_diagnostic(model, module, pkg, usage));
+            }
+        }
+    }
+    diagnostics
+}
+
+fn check_items(
+    model: &Model,
+    graph: &Graph,
+    candidates: &[(ItemId, NodeId)],
+    tables: &UsageTables,
+    scope: Option<NodeId>,
+) -> Vec<Diagnostic> {
     let mut suppressed_parents: HashSet<ItemId> = HashSet::new();
     let mut diagnostics = Vec::new();
-    for &(id, pkg) in &candidates {
+    for &(id, pkg) in candidates {
         if model.items[id.index()].kind != ItemKind::Type {
             continue;
         }
-        let Some(usage) = usage_for(model, graph, id, &item_usage, &thing_usage) else {
+        let Some(usage) = usage_for(model, graph, id, &tables.item_usage, &tables.thing_usage)
+        else {
             continue;
         };
         if let Some(diag) = classify(model, graph, id, pkg, usage, scope) {
@@ -107,10 +236,9 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         }
     }
 
-    // Second pass: functions and constants.
-    for &(id, pkg) in &candidates {
+    for &(id, pkg) in candidates {
         let item = &model.items[id.index()];
-        if item.kind == ItemKind::Type {
+        if matches!(item.kind, ItemKind::Type | ItemKind::Module) {
             continue;
         }
         if item
@@ -119,7 +247,8 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         {
             continue;
         }
-        let Some(usage) = usage_for(model, graph, id, &item_usage, &thing_usage) else {
+        let Some(usage) = usage_for(model, graph, id, &tables.item_usage, &tables.thing_usage)
+        else {
             continue;
         };
         if let Some(diag) = classify(model, graph, id, pkg, usage, scope) {
@@ -172,23 +301,23 @@ fn classify(
     Some(build_diagnostic(model, graph, id, pkg, usage))
 }
 
-fn record(usage: &mut Usage, test: bool, external: bool, outside_home: bool, from: NodeId) {
-    if test {
+fn record(usage: &mut Usage, site: AccessSite) {
+    if site.test {
         usage.test_used = true;
-        if external {
+        if site.external {
             usage.test_external_to_lib = true;
         }
-        if outside_home {
+        if site.outside_home {
             usage.test_outside_home = true;
         }
     } else {
         usage.prod_used = true;
-        if external {
+        if site.external {
             usage.prod_external_to_lib = true;
         } else {
-            *usage.internal_modules.entry(from).or_default() += 1;
+            *usage.internal_modules.entry(site.from).or_default() += 1;
         }
-        if outside_home {
+        if site.outside_home {
             usage.prod_outside_home = true;
         }
     }
@@ -202,9 +331,39 @@ fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
     }
     if !matches!(
         item.kind,
-        ItemKind::Type | ItemKind::Function | ItemKind::Constant
+        ItemKind::Type
+            | ItemKind::Function
+            | ItemKind::Constant
+            | ItemKind::Field
+            | ItemKind::Module
     ) {
         return None;
+    }
+    if item.kind == ItemKind::Field {
+        if item.holds_nothing {
+            return None;
+        }
+        let parent = item.parent?;
+        if model.serde_types.contains(&parent) {
+            return None;
+        }
+    }
+    if item.kind == ItemKind::Module {
+        let module = item.module?;
+        if tree.is_test(module) {
+            return None;
+        }
+        if item.file.is_some_and(|f| {
+            let fi = &model.files[f.index()];
+            fi.test || fi.target != Some(TargetKind::Library)
+        }) {
+            return None;
+        }
+        let pkg = tree.package_of(module)?;
+        if tree.node(pkg).publish {
+            return None;
+        }
+        return Some(pkg);
     }
     let file = item.file?;
     let file_info = &model.files[file.index()];
@@ -249,6 +408,76 @@ fn home_of(model: &Model, graph: &Graph, id: ItemId) -> NodeId {
     })
 }
 
+fn build_module_diagnostic(
+    model: &Model,
+    module: NodeId,
+    pkg: NodeId,
+    usage: &Usage,
+) -> Diagnostic {
+    let tree = &model.tree;
+    let key = tree.display(module);
+    let name = &tree.node(module).name;
+    let pkg_name = tree.display(pkg);
+    let location = module_location(model, module);
+    if !usage.prod_used && usage.test_used {
+        Diagnostic {
+            lint: Lint::Surface(SurfaceLint::TestOnlyPub),
+            key: key.clone(),
+            message: format!("`pub mod {name}` is only referenced by tests"),
+            location,
+            notes: vec![format!("defined in private crate `{pkg_name}`")],
+            picture: Picture::Arrow {
+                from: key,
+                to: "(tests only)".to_owned(),
+                detail: "gate behind #[cfg(test)] or narrow to `pub(crate) mod`".to_owned(),
+            },
+        }
+    } else if !usage.prod_used {
+        Diagnostic {
+            lint: Lint::Surface(SurfaceLint::UnusedPub),
+            key: key.clone(),
+            message: format!("`pub mod {name}` has no non-test callers outside itself"),
+            location,
+            notes: vec![format!("defined in private crate `{pkg_name}`")],
+            picture: Picture::Arrow {
+                from: key,
+                to: "(no callers)".to_owned(),
+                detail: "narrow to private `mod` or remove dead module".to_owned(),
+            },
+        }
+    } else if usage.test_external_to_lib {
+        Diagnostic {
+            lint: Lint::Surface(SurfaceLint::TestOnlyPub),
+            key: key.clone(),
+            message: format!(
+                "`pub mod {name}` is `pub` only for external tests; all non-test callers are inside `{pkg_name}`"
+            ),
+            location,
+            notes: vec!["narrow to `pub(crate) mod` or private `mod`".to_owned()],
+            picture: Picture::Arrow {
+                from: key,
+                to: pkg_name,
+                detail: "external callers are exclusively tests".to_owned(),
+            },
+        }
+    } else {
+        Diagnostic {
+            lint: Lint::Surface(SurfaceLint::OverPublic),
+            key: key.clone(),
+            message: format!(
+                "`pub mod {name}` has no external non-test callers; only used inside `{pkg_name}`"
+            ),
+            location,
+            notes: vec!["narrow to `pub(crate) mod` or private `mod`".to_owned()],
+            picture: Picture::Arrow {
+                from: key,
+                to: pkg_name,
+                detail: "no external crate or binary references items in this module".to_owned(),
+            },
+        }
+    }
+}
+
 fn build_diagnostic(
     model: &Model,
     graph: &Graph,
@@ -267,7 +496,7 @@ fn build_diagnostic(
         let home_name = tree.display(home);
         if !usage.prod_used && usage.test_used {
             Diagnostic {
-                lint: Lint::TestOnlyPub,
+                lint: Lint::Surface(SurfaceLint::TestOnlyPub),
                 key: key.clone(),
                 message: format!(
                     "`{name}` is `pub(crate)`/`pub(super)` but only referenced by tests"
@@ -282,7 +511,7 @@ fn build_diagnostic(
             }
         } else if usage.test_outside_home {
             Diagnostic {
-                lint: Lint::TestOnlyPub,
+                lint: Lint::Surface(SurfaceLint::TestOnlyPub),
                 key: key.clone(),
                 message: format!(
                     "`{name}` is `pub(crate)`/`pub(super)` only for tests outside `{home_name}`"
@@ -299,7 +528,7 @@ fn build_diagnostic(
             }
         } else {
             Diagnostic {
-                lint: Lint::OverPublic,
+                lint: Lint::Surface(SurfaceLint::OverPublic),
                 key: key.clone(),
                 message: format!(
                     "`{name}` is `pub(crate)`/`pub(super)` but only used inside `{home_name}`"
@@ -316,7 +545,7 @@ fn build_diagnostic(
         }
     } else if !usage.prod_used && usage.test_used {
         Diagnostic {
-            lint: Lint::TestOnlyPub,
+            lint: Lint::Surface(SurfaceLint::TestOnlyPub),
             key: key.clone(),
             message: format!("`{name}` is `pub` but only referenced by tests"),
             location,
@@ -329,7 +558,7 @@ fn build_diagnostic(
         }
     } else if !usage.prod_used {
         Diagnostic {
-            lint: Lint::UnusedPub,
+            lint: Lint::Surface(SurfaceLint::UnusedPub),
             key: key.clone(),
             message: format!(
                 "`{name}` is `pub` but has no non-test callers (never referenced in the workspace)"
@@ -345,7 +574,7 @@ fn build_diagnostic(
     } else if usage.test_external_to_lib {
         let pkg_name = tree.display(pkg);
         Diagnostic {
-            lint: Lint::TestOnlyPub,
+            lint: Lint::Surface(SurfaceLint::TestOnlyPub),
             key: key.clone(),
             message: format!(
                 "`{name}` is `pub` only for external tests; all non-test callers are inside `{pkg_name}`"
@@ -377,7 +606,7 @@ fn build_diagnostic(
         }
         let pkg_name = tree.display(pkg);
         Diagnostic {
-            lint: Lint::OverPublic,
+            lint: Lint::Surface(SurfaceLint::OverPublic),
             key: key.clone(),
             message: format!(
                 "`{name}` is `pub` but only used inside `{pkg_name}` ({} in {})",
@@ -441,8 +670,11 @@ mod tests {
         assert_eq!(
             report(&sample),
             vec![
-                (Lint::UnusedPub, "p::api::dead".into()),
-                (Lint::OverPublic, "p::api::internal".into()),
+                (Lint::Surface(SurfaceLint::UnusedPub), "p::api::dead".into()),
+                (
+                    Lint::Surface(SurfaceLint::OverPublic),
+                    "p::api::internal".into()
+                ),
             ]
         );
     }
@@ -486,7 +718,10 @@ mod tests {
         sample.model.items[method.index()].visibility = Visibility::Pub;
         assert_eq!(
             report(&sample),
-            vec![(Lint::UnusedPub, "p::api::Ghost".into())]
+            vec![(
+                Lint::Surface(SurfaceLint::UnusedPub),
+                "p::api::Ghost".into()
+            )]
         );
     }
 
@@ -521,9 +756,64 @@ mod tests {
         assert_eq!(
             report(&sample),
             vec![
-                (Lint::TestOnlyPub, "p::api::helper_for_tests".into()),
-                (Lint::TestOnlyPub, "p::api::internal_plus_it".into()),
+                (
+                    Lint::Surface(SurfaceLint::TestOnlyPub),
+                    "p::api::helper_for_tests".into()
+                ),
+                (
+                    Lint::Surface(SurfaceLint::TestOnlyPub),
+                    "p::api::internal_plus_it".into()
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn pub_mod_and_pub_fields_are_checked_for_over_public() {
+        let mut sample = private_sample();
+        let root = sample.module("");
+        let internal_mod = sample.module("detail");
+        let mod_item = sample.item(root, "detail", ItemKind::Module);
+        sample.model.items[mod_item.index()].module = Some(internal_mod);
+        sample.model.items[mod_item.index()].visibility = Visibility::Pub;
+
+        let caller = sample.module("caller");
+        let ty = sample.item(internal_mod, "Cfg", ItemKind::Type);
+        sample.model.items[ty.index()].visibility = Visibility::Pub;
+        let pub_field = sample.member(ty, internal_mod, "Cfg::secret", ItemKind::Field);
+        sample.model.items[pub_field.index()].visibility = Visibility::Pub;
+
+        // External crate uses `Cfg` (so `Cfg` and `detail` are justified? No, let's keep
+        // `detail` internal-only and test `Cfg` in `api` with an internal-only `pub` field).
+        let caller_fn = sample.item(caller, "use_detail", ItemKind::Function);
+        sample.refer(caller_fn, ty);
+        sample.refer(caller_fn, pub_field);
+
+        // Second module `api` has an externally-used type with an internal-only `pub` field.
+        let api = sample.module("api");
+        let api_ty = sample.item(api, "Public", ItemKind::Type);
+        sample.model.items[api_ty.index()].visibility = Visibility::Pub;
+        let internal_field = sample.member(api_ty, api, "Public::local", ItemKind::Field);
+        sample.model.items[internal_field.index()].visibility = Visibility::Pub;
+        sample.refer(caller_fn, internal_field);
+
+        let tree_root = sample.model.tree.root();
+        let other = sample.model.tree.child(tree_root, NodeKind::Package, "app");
+        sample.file(other, "app/src/main.rs", 1);
+        let main_fn = sample.item(other, "main", ItemKind::Function);
+        sample.refer(main_fn, api_ty);
+
+        let found = report(&sample);
+        assert!(
+            found.contains(&(Lint::Surface(SurfaceLint::OverPublic), "p::detail".into())),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&(
+                Lint::Surface(SurfaceLint::OverPublic),
+                "p::api::Public::local".into()
+            )),
+            "{found:?}"
         );
     }
 }

@@ -33,6 +33,20 @@ pub struct Model {
     pub layers: Vec<Vec<String>>,
     /// Structs/enums deriving `Serialize` or `Deserialize`.
     pub serde_types: HashSet<ItemId>,
+    /// Workspace `trait` items.
+    pub traits: HashSet<ItemId>,
+    /// Observed `impl Trait for Type` blocks keyed by the trait's [`ItemId`].
+    pub trait_impls: HashMap<ItemId, Vec<TraitImpl>>,
+}
+
+/// One `impl Trait for Type` block observed in the workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraitImpl {
+    pub owner: NodeId,
+    pub test: bool,
+    /// True when `Type` is a concrete workspace type (false for std/external
+    /// extension traits and blanket `impl<T> Trait for T`).
+    pub local_self: bool,
 }
 
 /// Normalized structural fingerprint of a function body for clone detection.
@@ -43,6 +57,15 @@ pub struct BodyFingerprint {
     pub tokens: u32,
 }
 
+/// Positional argument-swap hazard in a function's parameter list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionalTrap {
+    /// Two or more `bool` parameters.
+    Booleans(u16),
+    /// Four or more consecutive parameters of the same primitive type.
+    RepeatedPrimitive { count: u16, kind: &'static str },
+}
+
 /// Structural metrics of a defined function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FunctionMetrics {
@@ -51,6 +74,7 @@ pub struct FunctionMetrics {
     pub params: u16,
     pub returns_string_error: bool,
     pub body_fingerprint: Option<BodyFingerprint>,
+    pub positional_trap: Option<PositionalTrap>,
 }
 
 /// An item's declared visibility, ordered from narrowest to widest.

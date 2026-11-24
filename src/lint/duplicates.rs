@@ -1,16 +1,26 @@
-//! `duplicate-code`: non-trivial non-test functions whose normalized token
-//! streams are identical across different locations.
+//! `duplicate-code` and `duplicate-struct`: copy-pasted functions with identical
+//! normalized bodies and parallel shadow structs with identical field sets.
 
 use std::collections::BTreeMap;
 
 use super::{
-    Diagnostic, HELD_IN_MIND, Lint, Location, Picture, clickable, counted, in_scope, item_location,
-    without_generics,
+    Diagnostic, HELD_IN_MIND, HygieneLint, Lint, Location, Picture, clickable, counted, full_name,
+    in_scope, item_location, listed, without_generics,
 };
-use crate::graph::Graph;
+use crate::graph::{Graph, ThingId};
 use crate::model::{BodyFingerprint, ItemId, ItemKind, Model, NodeId};
 
+/// Minimum non-marker fields required before two structs with identical field
+/// names are flagged as `duplicate-struct`.
+const MIN_STRUCT_FIELDS: usize = 4;
+
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let mut diagnostics = check_functions(model, graph, scope);
+    diagnostics.extend(check_structs(model, graph, scope));
+    diagnostics
+}
+
+fn check_functions(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
     let mut groups: BTreeMap<BodyFingerprint, Vec<(String, NodeId, Location, ItemId)>> =
         BTreeMap::new();
@@ -69,7 +79,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             ));
         }
         diagnostics.push(Diagnostic {
-            lint: Lint::DuplicateCode,
+            lint: Lint::Hygiene(HygieneLint::DuplicateCode),
             key,
             message: format!(
                 "{} share an identical normalized body ({} tokens)",
@@ -77,6 +87,98 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                 fp.tokens
             ),
             location: Some(first_loc),
+            notes,
+            picture: Picture::Bar {
+                label: "copies".to_owned(),
+                length: entries.len(),
+                most: 1,
+            },
+        });
+    }
+    diagnostics
+}
+
+fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let tree = &model.tree;
+    let mut by_thing: BTreeMap<ThingId, Vec<String>> = BTreeMap::new();
+    for (index, item) in model.items.iter().enumerate() {
+        let of_struct = item
+            .parent
+            .is_some_and(|parent| model.items[parent.index()].kind == ItemKind::Type);
+        if item.kind == ItemKind::Field
+            && of_struct
+            && !item.holds_nothing
+            && !tree.is_test(item.owner)
+            && item.file.is_none_or(|f| !model.files[f.index()].test)
+            && let Some(thing) = graph.thing_of[index]
+        {
+            let leaf = item.name.rsplit("::").next().unwrap_or(&item.name);
+            by_thing.entry(thing).or_default().push(leaf.to_owned());
+        }
+    }
+
+    // Group structs with identical `(is_serde, sorted_field_names)` so intentional
+    // wire-DTO vs domain pairs stay separate while shadow clones in the same layer match.
+    struct StructCopy {
+        key: String,
+        home: NodeId,
+        location: Option<Location>,
+    }
+    let mut groups: BTreeMap<(bool, Vec<String>), Vec<StructCopy>> = BTreeMap::new();
+    for (thing, mut fields) in by_thing {
+        if fields.len() < MIN_STRUCT_FIELDS {
+            continue;
+        }
+        fields.sort();
+        let type_item = graph.things[thing.index()].item;
+        let home = graph.things[thing.index()].home;
+        let is_serde = model.serde_types.contains(&type_item);
+        let key = full_name(model, graph, thing);
+        let location = item_location(model, type_item);
+        groups
+            .entry((is_serde, fields))
+            .or_default()
+            .push(StructCopy {
+                key,
+                home,
+                location,
+            });
+    }
+
+    let mut diagnostics = Vec::new();
+    for ((_, fields), mut entries) in groups {
+        entries.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| a.location.cmp(&b.location)));
+        entries.dedup_by(|a, b| a.key == b.key);
+        if entries.len() < 2 {
+            continue;
+        }
+        if !entries.iter().any(|e| in_scope(tree, scope, e.home)) {
+            continue;
+        }
+        let key = entries
+            .iter()
+            .map(|e| e.key.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let first_loc = entries.iter().find_map(|e| e.location.clone());
+        let mut notes: Vec<String> = entries
+            .iter()
+            .take(HELD_IN_MIND)
+            .map(|e| match &e.location {
+                Some(loc) => format!("{}: `{}`", clickable(loc), e.key),
+                None => format!("`{}`", e.key),
+            })
+            .collect();
+        notes.push(format!("shared fields: {}", listed(&fields)));
+        diagnostics.push(Diagnostic {
+            lint: Lint::Hygiene(HygieneLint::DuplicateStruct),
+            key,
+            message: format!(
+                "{} duplicate the same {} fields",
+                counted(entries.len(), "struct"),
+                fields.len()
+            ),
+            location: first_loc,
             notes,
             picture: Picture::Bar {
                 label: "copies".to_owned(),
@@ -122,5 +224,34 @@ mod tests {
             .map(|d| d.key)
             .collect();
         assert_eq!(keys, ["p::a::compute,p::b::compute_copy"]);
+    }
+
+    #[test]
+    fn duplicate_struct_flags_same_layer_shadow_structs_and_spares_serde_vs_domain() {
+        let mut sample = Sample::new();
+        let (a, b) = (sample.module("a"), sample.module("b"));
+        let s1 = sample.item(a, "ConfigA", ItemKind::Type);
+        let s2 = sample.item(b, "ConfigB", ItemKind::Type);
+        let dto = sample.item(b, "ConfigJson", ItemKind::Type);
+        sample.model.serde_types.insert(dto);
+        for ty in [s1, s2, dto] {
+            let home = sample.model.items[ty.index()].owner;
+            let ty_name = sample.model.items[ty.index()].name.clone();
+            for field in ["ante", "bb", "sb", "stack"] {
+                sample.member(ty, home, &format!("{ty_name}::{field}"), ItemKind::Field);
+            }
+        }
+        let graph = Graph::new(&sample.model);
+        let keys: Vec<(Lint, String)> = check(&sample.model, &graph, None)
+            .into_iter()
+            .map(|d| (d.lint, d.key))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![(
+                Lint::Hygiene(HygieneLint::DuplicateStruct),
+                "p::a::ConfigA,p::b::ConfigB".into()
+            )]
+        );
     }
 }
