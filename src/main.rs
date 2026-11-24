@@ -51,9 +51,10 @@ usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]
        [--target <triple>] [-F, --features <features>] [--all-features]
        [--no-default-features]
 
-Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,
-wide-type, scattered-impl, unused-pub, over-public, pass-through,
-wide-directory, long-file) on the Cargo workspace.
+Runs architectural lints (module-cycle, tangle, field-leak, shared-mutable-bag,
+shallow-module, wide-type, wide-module, wide-struct, scattered-impl, unused-pub,
+over-public, pass-through, long-function, wide-signature, high-fan-out,
+feature-envy, wide-directory, long-file) on the Cargo workspace.
 
 options:
   <crate_or_mod>               check only one crate or module (e.g. my-crate)

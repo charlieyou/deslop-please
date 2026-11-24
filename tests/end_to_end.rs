@@ -741,7 +741,10 @@ fn wide_type_flags_bloated_types_and_ignores_passive_error_types() {
     assert_eq!(report.code, Some(1));
     assert!(report.stdout.contains("error[wide-type]: `God` is wide"));
     assert!(!report.stdout.contains("`Err` is wide"));
-    assert_eq!(keys(&ws), ["wide-type wide::store::God"]);
+    assert_eq!(
+        keys(&ws),
+        ["wide-module wide::store", "wide-type wide::store::God"]
+    );
 }
 
 #[test]
@@ -869,4 +872,97 @@ fn pass_through_catches_shims_and_glob_reexports_but_spares_builders_and_private
             "pass-through shims::exposed::*",
         ]
     );
+}
+
+#[test]
+fn functions_wide_module_wide_struct_bag_and_coupling_lints_work_end_to_end() {
+    // 1. long-function & wide-signature
+    let mut big_body = String::from(
+        "pub fn huge(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32) -> u32 {\n    let mut s = a + b + c + d + e + f + g + h;\n",
+    );
+    for _ in 0..155 {
+        big_body.push_str("    s += 1;\n");
+    }
+    big_body.push_str("    s\n}\n");
+
+    // 2. wide-module (16 free functions in leaf module `utils`)
+    let mut utils_rs = String::new();
+    let mut drive_utils = String::from("let mut total = 0u32;\n");
+    for i in 0..16 {
+        utils_rs.push_str(&format!("pub fn u{i}(x: u32) -> u32 {{ x + {i} }}\n"));
+        drive_utils.push_str(&format!("total += utils::u{i}(total);\n"));
+    }
+
+    // 3. wide-struct (16 fields on non-serde struct)
+    let mut bag_rs = String::from("pub struct Bag {\n");
+    for i in 0..16 {
+        bag_rs.push_str(&format!("    pub f{i}: u32,\n"));
+    }
+    bag_rs.push_str("}\n");
+
+    // 4. shared-mutable-bag (mutated from 2 external modules, 0 kept fields)
+    let mut_a = "use crate::bag::Bag;\npub fn touch_a(b: &mut Bag) { b.f0 += 1; }\n";
+    let mut_b = "use crate::bag::Bag;\npub fn touch_b(b: &mut Bag) { b.f1 = 2; }\n";
+
+    // 5. feature-envy (5 distinct methods on foreign type `Target`)
+    let target_rs = "pub struct Target { x: u32 }\n\
+                     impl Target {\n\
+                         pub fn m0(&self) -> u32 { self.x + 10 }\n\
+                         pub fn m1(&self) -> u32 { self.x + 1 }\n\
+                         pub fn m2(&self) -> u32 { self.x + 2 }\n\
+                         pub fn m3(&self) -> u32 { self.x + 3 }\n\
+                         pub fn m4(&self) -> u32 { self.x + 4 }\n\
+                     }\n";
+    let envious_rs = "use crate::target::Target;\n\
+                      pub struct Inspector;\n\
+                      impl Inspector {\n\
+                          pub fn inspect(&self, t: &Target) -> u32 {\n\
+                              t.m0() + t.m1() + t.m2() + t.m3() + t.m4()\n\
+                          }\n\
+                      }\n";
+
+    let ws = scratch_workspace(
+        "next_six_e2e",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"nextsix\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n[workspace]\n",
+            ),
+            (
+                "src/lib.rs",
+                &format!(
+                    "mod bag;\nmod envious;\nmod mut_a;\nmod mut_b;\nmod target;\nmod utils;\n\
+                     {big_body}\n\
+                     pub(crate) fn internal_only_root() -> u32 {{ 1 }}\n\
+                     pub fn drive(b: &mut bag::Bag, t: &target::Target) -> u32 {{\n\
+                         {drive_utils}\n\
+                         mut_a::touch_a(b);\n\
+                         mut_b::touch_b(b);\n\
+                         total + envious::Inspector.inspect(t) + internal_only_root()\n\
+                     }}\n"
+                ),
+            ),
+            ("src/utils.rs", &utils_rs),
+            ("src/bag.rs", &bag_rs),
+            ("src/mut_a.rs", mut_a),
+            ("src/mut_b.rs", mut_b),
+            ("src/target.rs", target_rs),
+            ("src/envious.rs", envious_rs),
+        ],
+    );
+    let found = keys(&ws);
+    for expected in [
+        "feature-envy nextsix::envious::Inspector::inspect",
+        "long-function nextsix::huge",
+        "over-public nextsix::internal_only_root",
+        "shared-mutable-bag nextsix::bag::Bag",
+        "wide-module nextsix::utils",
+        "wide-signature nextsix::huge",
+        "wide-struct nextsix::bag::Bag",
+    ] {
+        assert!(
+            found.iter().any(|k| k == expected),
+            "missing `{expected}` in {found:?}"
+        );
+    }
 }

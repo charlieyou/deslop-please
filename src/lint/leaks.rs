@@ -57,7 +57,12 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
     let mut diagnostics = Vec::new();
     for (thing, fields) in fields {
         let kept = fields.iter().any(|field| !outside.contains_key(field));
+        let type_item = graph.things[thing.index()].item;
+        let is_serde = model.serde_types.contains(&type_item);
         if !kept || !working.contains(&thing) {
+            if let Some(diag) = shared_mutable_bag(model, graph, thing, &fields, &outside, scope) {
+                diagnostics.push(diag);
+            }
             continue;
         }
         for &field in &fields {
@@ -69,6 +74,14 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                 .filter(|usage| !usage.copies)
                 .collect();
             if uses.is_empty() {
+                continue;
+            }
+            // Serde DTOs/configs are plain schemas unless outsiders mutate their fields.
+            if is_serde
+                && !uses
+                    .iter()
+                    .any(|usage| model.references[usage.reference].mutates)
+            {
                 continue;
             }
             let home = graph.things[thing.index()].home;
@@ -83,6 +96,106 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         }
     }
     diagnostics
+}
+
+/// `shared-mutable-bag`: a struct skipped by `field-leak` (keeps no fields or
+/// has no `&self` methods) whose fields are mutated from 2 or more modules
+/// outside its home module.
+fn shared_mutable_bag(
+    model: &Model,
+    graph: &Graph,
+    thing: ThingId,
+    fields: &[ItemId],
+    outside: &HashMap<ItemId, Vec<&Use>>,
+    scope: Option<NodeId>,
+) -> Option<Diagnostic> {
+    let tree = &model.tree;
+    let home = graph.things[thing.index()].home;
+    let mut mutating_modules: BTreeMap<NodeId, BTreeSet<Location>> = BTreeMap::new();
+    let mut mutated_fields: BTreeSet<String> = BTreeSet::new();
+    let mut sites: BTreeMap<Location, String> = BTreeMap::new();
+
+    for &field in fields {
+        for usage in outside.get(&field).into_iter().flatten() {
+            let reference = &model.references[usage.reference];
+            if !reference.mutates || tree.is_within(reference.from, home) {
+                continue;
+            }
+            let at = Location {
+                file: model.files[reference.file.index()].path.clone(),
+                line: reference.line,
+            };
+            mutating_modules
+                .entry(reference.from)
+                .or_default()
+                .insert(at.clone());
+            mutated_fields.insert(bare_name(model, field));
+            let user = match reference.holder {
+                Some(holder) => {
+                    let h = &model.items[holder.index()];
+                    format!("{}::{}", tree.display(h.owner), without_generics(&h.name))
+                }
+                None => tree.display(reference.from),
+            };
+            sites
+                .entry(at)
+                .or_insert(format!("`{user}` mutates `{}`", bare_name(model, field)));
+        }
+    }
+    if mutating_modules.len() < 2 {
+        return None;
+    }
+    let concerned = in_scope(tree, scope, home)
+        || mutating_modules
+            .keys()
+            .any(|&module| in_scope(tree, scope, module));
+    if !concerned {
+        return None;
+    }
+
+    let owner = &graph.things[thing.index()];
+    let type_name = without_generics(&model.items[owner.item.index()].name);
+    let key = format!("{}::{type_name}", tree.display(home));
+    let mut notes: Vec<String> = sites
+        .iter()
+        .take(HELD_IN_MIND)
+        .map(|(at, desc)| format!("{}: {desc}", clickable(at)))
+        .collect();
+    if sites.len() > HELD_IN_MIND {
+        notes.push(format!(
+            "and {}",
+            counted(sites.len() - HELD_IN_MIND, "more place")
+        ));
+    }
+    let mut modules: Vec<(usize, String)> = mutating_modules
+        .iter()
+        .map(|(&m, locs)| (locs.len(), tree.display(m)))
+        .collect();
+    modules.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let module_count = modules.len();
+    if modules.len() > HELD_IN_MIND {
+        let more = modules.split_off(HELD_IN_MIND);
+        let count = more.iter().map(|(c, _)| c).sum();
+        modules.push((count, format!("in {}", counted(more.len(), "more module"))));
+    }
+    let field_list: Vec<String> = mutated_fields.into_iter().collect();
+    Some(Diagnostic {
+        lint: Lint::SharedMutableBag,
+        key: key.clone(),
+        message: format!(
+            "`{type_name}` is a shared mutable bag: {} mutated across {}",
+            counted(field_list.len(), "field"),
+            counted(module_count, "module")
+        ),
+        location: sites.keys().next().cloned(),
+        notes,
+        picture: Picture::Spread {
+            owner: key,
+            field: "mut".to_owned(),
+            modules,
+            others: vec![format!("mutated fields: {}", listed(&field_list))],
+        },
+    })
 }
 
 /// Whether `usage` is by a method with a `self` parameter: one that works on

@@ -106,7 +106,8 @@ impl<'a> Builder<'a> {
         self.read_symbol_information(index);
         self.mark_test_code();
         self.place_in_types();
-        self.mark_first_param_types();
+        self.mark_function_info();
+        let serde_types = self.collect_serde_types();
         self.mark_copies();
         self.mark_markers();
         let wrappers = self.wrappers();
@@ -118,6 +119,7 @@ impl<'a> Builder<'a> {
             references: self.references,
             wrappers,
             glob_reexports: self.glob_reexports,
+            serde_types,
         }
     }
 
@@ -290,6 +292,14 @@ impl<'a> Builder<'a> {
             .inline_modules
             .innermost(occurrence.range)
             .unwrap_or(module);
+        let (access, mutates) = if self.functions.contains(&item) {
+            (unit.source.call_access(occurrence.range), false)
+        } else {
+            (
+                unit.source.access(occurrence.range),
+                unit.source.mutates(occurrence.range),
+            )
+        };
         self.references.push(Reference {
             file: unit.file,
             line: occurrence.range.start.line + 1,
@@ -297,50 +307,70 @@ impl<'a> Builder<'a> {
             holder: unit.holders.innermost(occurrence.range),
             item,
             copies: false,
+            mutates,
             test: false,
         });
-        let access = if self.functions.contains(&item) {
-            unit.source.call_access(occurrence.range)
-        } else {
-            unit.source.access(occurrence.range)
-        };
         self.accesses.push(access);
         Ok(())
     }
 
-    /// Records the workspace type of each free function's first parameter.
-    fn mark_first_param_types(&mut self) {
-        let mut found = Vec::new();
+    /// Records lines, branch count, parameter count, and (for free functions)
+    /// the workspace type of the first parameter.
+    fn mark_function_info(&mut self) {
+        let mut metrics_found = Vec::new();
+        let mut param_types_found = Vec::new();
         for (&item, &definition) in &self.definitions {
             let entry = &self.items[item.index()];
-            if entry.kind != ItemKind::Function || entry.parent.is_some() {
+            if entry.kind != ItemKind::Function {
                 continue;
             }
             let Some((at, range)) = definition else {
                 continue;
             };
             let unit = &self.units[at];
-            let Some(type_range) = unit.source.first_param_type(range) else {
+            let Some((metrics, type_range)) = unit.source.function_info(range) else {
                 continue;
             };
-            let ty = unit
-                .document
-                .occurrences
-                .iter()
-                .find(|o| o.range == type_range && !o.definition)
-                .and_then(|o| match self.symbols.get(o.symbol) {
-                    Some(&Named::Item(ty)) if self.items[ty.index()].kind == ItemKind::Type => {
-                        Some(ty)
-                    }
-                    _ => None,
-                });
-            if let Some(ty) = ty {
-                found.push((item, ty));
+            metrics_found.push((item, metrics));
+            if entry.parent.is_none()
+                && let Some(type_range) = type_range
+                && let Some(ty) = unit
+                    .document
+                    .occurrences
+                    .iter()
+                    .find(|o| o.range == type_range && !o.definition)
+                    .and_then(|o| match self.symbols.get(o.symbol) {
+                        Some(&Named::Item(ty)) if self.items[ty.index()].kind == ItemKind::Type => {
+                            Some(ty)
+                        }
+                        _ => None,
+                    })
+            {
+                param_types_found.push((item, ty));
             }
         }
-        for (item, ty) in found {
+        for (item, metrics) in metrics_found {
+            self.items[item.index()].metrics = Some(metrics);
+        }
+        for (item, ty) in param_types_found {
             self.items[item.index()].first_param_type = Some(ty);
         }
+    }
+
+    /// Finds workspace structs/enums deriving `Serialize` or `Deserialize`.
+    fn collect_serde_types(&self) -> HashSet<ItemId> {
+        let mut serde = HashSet::new();
+        for (&item, &definition) in &self.definitions {
+            if self.items[item.index()].kind != ItemKind::Type {
+                continue;
+            }
+            if let Some((at, range)) = definition
+                && self.units[at].source.has_serde_derive(range)
+            {
+                serde.insert(item);
+            }
+        }
+        serde
     }
 
     /// Marks the references to fields that only read the field's value: a
@@ -383,13 +413,18 @@ impl<'a> Builder<'a> {
             }
             if let Some(Wrapper::Accessor {
                 lent,
-                to_read: true,
+                to_read,
+                whole,
                 ..
             }) = wrappers.get(&called)
                 && !lent.is_empty()
             {
-                let reads = self.only_reads(self.accesses[at], lent, &mut plain);
-                self.references[at].copies = reads;
+                if *to_read {
+                    let reads = self.only_reads(self.accesses[at], lent, &mut plain);
+                    self.references[at].copies = reads;
+                } else if !*whole {
+                    self.references[at].mutates = true;
+                }
             }
         }
     }
@@ -460,6 +495,7 @@ impl<'a> Builder<'a> {
                 is_unsafe: false,
                 extern_abi: false,
                 holds_nothing: false,
+                metrics: None,
             });
             return Some(id);
         }
@@ -485,6 +521,7 @@ impl<'a> Builder<'a> {
             is_unsafe: false,
             extern_abi: false,
             holds_nothing: false,
+            metrics: None,
         });
         if symbol.is_function() {
             self.functions.insert(id);

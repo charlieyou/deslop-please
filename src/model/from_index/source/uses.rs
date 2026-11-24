@@ -47,6 +47,47 @@ const BORROWS: [&str; 8] = [
 /// Calls that overwrite what they are called on through a shared reference.
 const OVERWRITES: [&str; 5] = ["replace", "set", "store", "swap", "take"];
 
+/// Methods that mutate their receiver (directly or via interior mutability).
+const MUTATING_METHODS: [&str; 37] = [
+    "append",
+    "as_mut",
+    "as_mut_ptr",
+    "as_mut_slice",
+    "borrow_mut",
+    "clear",
+    "clone_from_slice",
+    "copy_from_slice",
+    "dedup",
+    "deref_mut",
+    "drain",
+    "entry",
+    "extend",
+    "fill",
+    "get_mut",
+    "insert",
+    "iter_mut",
+    "lock",
+    "or_insert",
+    "pop",
+    "push",
+    "remove",
+    "replace",
+    "resize",
+    "retain",
+    "reverse",
+    "set",
+    "sort",
+    "sort_by",
+    "sort_unstable",
+    "store",
+    "swap",
+    "swap_remove",
+    "take",
+    "truncate",
+    "write",
+    "write_all",
+];
+
 const SCALARS: [&str; 16] = [
     "bool", "char", "f32", "f64", "i128", "i16", "i32", "i64", "i8", "isize", "u128", "u16", "u32",
     "u64", "u8", "usize",
@@ -90,6 +131,55 @@ impl Source {
             return Access::Copy;
         }
         self.reached(at, at + 1).unwrap_or(Access::Copy)
+    }
+
+    /// Whether the code that names a field at `name` mutates it (writes it,
+    /// takes `&mut`, writes through indexing `f[i] = ..`, or calls a mutating
+    /// method on it). Plain reads, shared borrows, and read-only indexing
+    /// return `false`.
+    pub fn mutates(&self, name: Range) -> bool {
+        let tokens = &self.tokens;
+        let Some(offset) = self.offset(name.start) else {
+            return false;
+        };
+        let at = tokens.partition_point(|token| token.start < offset);
+        if at == 0 || at >= tokens.len() || !self.is(tokens[at - 1], ".") {
+            return false;
+        }
+        if self.borrowed(at) == Some(true) {
+            return true;
+        }
+        let mut end = at + 1;
+        loop {
+            if let [dot, part, ..] = &tokens[end..]
+                && self.is(*dot, ".")
+                && matches!(part.kind, Kind::Ident | Kind::Literal)
+            {
+                let after = tokens.get(end + 2).map(|token| self.text(*token));
+                if matches!(after, Some("(" | "::")) {
+                    return MUTATING_METHODS.contains(&self.text(*part));
+                }
+                end += 2;
+                continue;
+            }
+            if tokens.get(end).is_some_and(|t| self.is(*t, "["))
+                && let Some(close) = self.matching(end)
+            {
+                end = close + 1;
+                continue;
+            }
+            break;
+        }
+        let next = |ahead: usize| tokens.get(end + ahead).map(|token| self.text(*token));
+        let shifted = matches!(
+            (next(0), next(1), next(2)),
+            (Some("<"), Some("<"), Some("=")) | (Some(">"), Some(">"), Some("="))
+        );
+        let assigned = matches!(
+            next(0),
+            Some("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "^=" | "&=" | "|=")
+        );
+        assigned || shifted
     }
 
     /// What the code that calls a method at `name` does with what the call
@@ -551,5 +641,31 @@ mod tests {
         }
         let builder = "fn with_head(mut self, head: usize) -> Self { self.head = head; self }";
         assert_eq!(hands_out(builder), (true, false, false));
+    }
+
+    #[test]
+    fn mutates_distinguishes_writes_and_mutating_calls_from_reads() {
+        let mutates = |code: &str| Source::new(code.to_owned()).mutates(range(code, ".field", 1));
+        for yes in [
+            "s.field = 1;",
+            "s.field += 1;",
+            "s.field <<= 1;",
+            "s.field[0] = 1;",
+            "take(&mut s.field);",
+            "s.field.push(1);",
+            "s.field.clear();",
+            "s.field.set(2);",
+        ] {
+            assert!(mutates(yes), "{yes}");
+        }
+        for no in [
+            "let x = s.field;",
+            "let r = &s.field;",
+            "let v = s.field[0];",
+            "let n = s.field.len();",
+            "let c = s.field.clone();",
+        ] {
+            assert!(!mutates(no), "{no}");
+        }
     }
 }

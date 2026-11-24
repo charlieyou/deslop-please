@@ -9,7 +9,7 @@ mod tree;
 pub use from_index::build;
 pub use tree::{NodeId, NodeKind, Tree};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::workspace::TargetKind;
 
@@ -25,6 +25,16 @@ pub struct Model {
     pub wrappers: HashMap<ItemId, Wrapper>,
     /// `pub use <path>::*;` glob re-exports written in the workspace.
     pub glob_reexports: Vec<GlobReexport>,
+    /// Structs/enums deriving `Serialize` or `Deserialize`.
+    pub serde_types: HashSet<ItemId>,
+}
+
+/// Structural metrics of a defined function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FunctionMetrics {
+    pub lines: u32,
+    pub branches: u32,
+    pub params: u16,
 }
 
 /// An item's declared visibility, ordered from narrowest to widest.
@@ -100,6 +110,8 @@ pub struct Item {
     /// A field of a marker type, `PhantomData` or `PhantomPinned`, which
     /// holds nothing.
     pub holds_nothing: bool,
+    /// Structural size and parameter metrics for defined functions.
+    pub metrics: Option<FunctionMetrics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +144,9 @@ pub struct Reference {
     /// writes the field nor reaches into it. For a call of an accessor,
     /// directly or through forwarders: the code reads so what it lends.
     pub copies: bool,
+    /// For a field: the code writes it, borrows it mutably, or calls a
+    /// mutating method on it (not a plain read, shared borrow, or read index).
+    pub mutates: bool,
     pub test: bool,
 }
 
@@ -249,6 +264,7 @@ pub mod tests {
                 is_unsafe: false,
                 extern_abi: false,
                 holds_nothing: false,
+                metrics: None,
             });
             ItemId::new(self.model.items.len() - 1)
         }
@@ -277,6 +293,7 @@ pub mod tests {
                 holder: Some(holder),
                 item,
                 copies: false,
+                mutates: false,
                 test: false,
             });
         }

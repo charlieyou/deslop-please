@@ -3,7 +3,9 @@
 //! which things know which, wherever they are written; `wide-directory` and
 //! `long-file` read how the files are laid out.
 
+mod coupling;
 mod cycles;
+mod functions;
 mod layout;
 mod leaks;
 mod pass_through;
@@ -11,6 +13,8 @@ mod scattered_impl;
 mod shallow;
 mod tangles;
 mod visibility;
+mod wide_module;
+mod wide_struct;
 mod wide_type;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -31,12 +35,19 @@ pub enum Lint {
     ModuleCycle,
     Tangle,
     FieldLeak,
+    SharedMutableBag,
     ShallowModule,
     WideType,
+    WideModule,
+    WideStruct,
     ScatteredImpl,
     UnusedPub,
     OverPublic,
     PassThrough,
+    LongFunction,
+    WideSignature,
+    HighFanOut,
+    FeatureEnvy,
     WideDirectory,
     LongFile,
 }
@@ -47,12 +58,19 @@ impl Lint {
             Lint::ModuleCycle => "module-cycle",
             Lint::Tangle => "tangle",
             Lint::FieldLeak => "field-leak",
+            Lint::SharedMutableBag => "shared-mutable-bag",
             Lint::ShallowModule => "shallow-module",
             Lint::WideType => "wide-type",
+            Lint::WideModule => "wide-module",
+            Lint::WideStruct => "wide-struct",
             Lint::ScatteredImpl => "scattered-impl",
             Lint::UnusedPub => "unused-pub",
             Lint::OverPublic => "over-public",
             Lint::PassThrough => "pass-through",
+            Lint::LongFunction => "long-function",
+            Lint::WideSignature => "wide-signature",
+            Lint::HighFanOut => "high-fan-out",
+            Lint::FeatureEnvy => "feature-envy",
             Lint::WideDirectory => "wide-directory",
             Lint::LongFile => "long-file",
         }
@@ -63,12 +81,19 @@ impl Lint {
             "module-cycle" => Some(Lint::ModuleCycle),
             "tangle" => Some(Lint::Tangle),
             "field-leak" => Some(Lint::FieldLeak),
+            "shared-mutable-bag" => Some(Lint::SharedMutableBag),
             "shallow-module" => Some(Lint::ShallowModule),
             "wide-type" => Some(Lint::WideType),
+            "wide-module" => Some(Lint::WideModule),
+            "wide-struct" => Some(Lint::WideStruct),
             "scattered-impl" => Some(Lint::ScatteredImpl),
             "unused-pub" => Some(Lint::UnusedPub),
             "over-public" => Some(Lint::OverPublic),
             "pass-through" => Some(Lint::PassThrough),
+            "long-function" => Some(Lint::LongFunction),
+            "wide-signature" => Some(Lint::WideSignature),
+            "high-fan-out" => Some(Lint::HighFanOut),
+            "feature-envy" => Some(Lint::FeatureEnvy),
             "wide-directory" => Some(Lint::WideDirectory),
             "long-file" => Some(Lint::LongFile),
             _ => None,
@@ -153,9 +178,13 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     diagnostics.extend(leaks::check(model, &graph, scope));
     diagnostics.extend(shallow::check(model, &graph, scope));
     diagnostics.extend(wide_type::check(model, &graph, scope));
+    diagnostics.extend(wide_module::check(model, &graph, scope));
+    diagnostics.extend(wide_struct::check(model, &graph, scope));
     diagnostics.extend(scattered_impl::check(model, &graph, scope));
     diagnostics.extend(visibility::check(model, &graph, scope));
     diagnostics.extend(pass_through::check(model, &graph, scope));
+    diagnostics.extend(functions::check(model, &graph, scope));
+    diagnostics.extend(coupling::check(model, &graph, scope));
     diagnostics.extend(layout::check(model, scope));
     diagnostics.sort_by(|a, b| a.lint.cmp(&b.lint).then_with(|| a.key.cmp(&b.key)));
     diagnostics

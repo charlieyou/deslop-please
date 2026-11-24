@@ -1,0 +1,248 @@
+//! `high-fan-out` and `feature-envy`: coupling concentration lints over the
+//! workspace graph.
+//! - `high-fan-out`: a module directly referencing items from more than 15
+//!   distinct sibling or foreign workspace modules (excluding its own direct
+//!   children and its own ancestors).
+//! - `feature-envy`: a non-test inherent method on one type that uses 5 or more
+//!   distinct members (fields, methods, variants) of a single foreign type from
+//!   another module, more than twice as many as its own type/module, and
+//!   strictly more than any other foreign type.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::{
+    Diagnostic, Lint, Picture, counted, full_name, in_scope, item_location, listed,
+    module_location, without_generics,
+};
+use crate::graph::{Graph, ThingId};
+use crate::model::{ItemId, ItemKind, Model, NodeId};
+
+/// The most distinct sibling/foreign workspace modules one module may depend on.
+const MOST_FAN_OUT: usize = 15;
+
+/// The fewest distinct member items of a single foreign type that trigger
+/// `feature-envy`.
+const MIN_ENVY_ITEMS: usize = 5;
+
+pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let mut diagnostics = check_fan_out(model, graph, scope);
+    diagnostics.extend(check_feature_envy(model, graph, scope));
+    diagnostics
+}
+
+fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let tree = &model.tree;
+    let mut deps: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
+    for reference in model.references.iter().filter(|r| !r.test) {
+        let item = &model.items[reference.item.index()];
+        if item.kind == ItemKind::Module
+            || tree.is_test(item.owner)
+            || item.file.is_some_and(|file| model.files[file.index()].test)
+        {
+            continue;
+        }
+        let target_mod = graph.thing_of[reference.item.index()]
+            .map_or(item.owner, |thing| graph.things[thing.index()].home);
+        let from = reference.from;
+        if from == target_mod
+            || tree.parent(target_mod) == Some(from)
+            || tree.is_within(from, target_mod)
+        {
+            continue;
+        }
+        deps.entry(from).or_default().insert(target_mod);
+    }
+
+    let mut diagnostics = Vec::new();
+    for (module, targets) in deps {
+        if targets.len() <= MOST_FAN_OUT || !in_scope(tree, scope, module) {
+            continue;
+        }
+        let name = tree.display(module);
+        let mut target_names: Vec<String> = targets.iter().map(|&t| tree.display(t)).collect();
+        target_names.sort();
+        diagnostics.push(Diagnostic {
+            lint: Lint::HighFanOut,
+            key: name.clone(),
+            message: format!(
+                "`{name}` has high fan-out: it uses {}, more than {MOST_FAN_OUT}",
+                counted(targets.len(), "module")
+            ),
+            location: module_location(model, module),
+            notes: vec![format!("depends on: {}", listed(&target_names))],
+            picture: Picture::Bar {
+                label: "uses".to_owned(),
+                length: targets.len(),
+                most: MOST_FAN_OUT,
+            },
+        });
+    }
+    diagnostics
+}
+
+#[derive(Default)]
+struct FunctionUses {
+    own: BTreeSet<ItemId>,
+    foreign: BTreeMap<ThingId, BTreeSet<ItemId>>,
+}
+
+fn check_feature_envy(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let tree = &model.tree;
+    let mut by_fn: BTreeMap<ItemId, FunctionUses> = BTreeMap::new();
+
+    for usage in &graph.uses {
+        let reference = &model.references[usage.reference];
+        let Some(holder) = reference.holder else {
+            continue;
+        };
+        let fn_item = &model.items[holder.index()];
+        if fn_item.kind != ItemKind::Function
+            || fn_item.trait_impl
+            || fn_item.parent.is_none()
+            || model.wrappers.contains_key(&holder)
+        {
+            continue;
+        }
+        let Some(used_thing) = graph.thing_of[usage.item.index()] else {
+            continue;
+        };
+        let fn_thing = graph.thing_of[holder.index()];
+        let fn_home = fn_thing.map_or(fn_item.owner, |t| graph.things[t.index()].home);
+        let used_root = graph.things[used_thing.index()].item;
+        let used_home = graph.things[used_thing.index()].home;
+
+        let entry = by_fn.entry(holder).or_default();
+        if Some(used_thing) == fn_thing || used_home == fn_home {
+            entry.own.insert(usage.item);
+            continue;
+        }
+        if model.items[used_root.index()].kind == ItemKind::Type
+            && usage.item != used_root
+            && matches!(
+                model.items[usage.item.index()].kind,
+                ItemKind::Function | ItemKind::Field
+            )
+            && (model.items[usage.item.index()].kind == ItemKind::Function || !usage.copies)
+        {
+            entry
+                .foreign
+                .entry(used_thing)
+                .or_default()
+                .insert(usage.item);
+        }
+    }
+
+    let mut diagnostics = Vec::new();
+    for (holder, uses) in by_fn {
+        let own_items = &uses.own;
+        let mut ranked: Vec<(usize, ThingId, &BTreeSet<ItemId>)> = uses
+            .foreign
+            .iter()
+            .map(|(&ty, items)| (items.len(), ty, items))
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let Some(&(top_count, top_type, top_items)) = ranked.first() else {
+            continue;
+        };
+        let second_count = ranked.get(1).map_or(0, |&(c, ..)| c);
+        if top_count < MIN_ENVY_ITEMS
+            || top_count <= own_items.len() * 2
+            || top_count <= second_count
+        {
+            continue;
+        }
+        let fn_item = &model.items[holder.index()];
+        let fn_home =
+            graph.thing_of[holder.index()].map_or(fn_item.owner, |t| graph.things[t.index()].home);
+        if !in_scope(tree, scope, fn_home) {
+            continue;
+        }
+        let fn_name = without_generics(&fn_item.name);
+        let key = format!("{}::{fn_name}", tree.display(fn_home));
+        let target_full = full_name(model, graph, top_type);
+        let target_name =
+            without_generics(&model.items[graph.things[top_type.index()].item.index()].name);
+        let mut member_names: Vec<String> = top_items
+            .iter()
+            .map(|&m| without_generics(&model.items[m.index()].name))
+            .collect();
+        member_names.sort();
+        diagnostics.push(Diagnostic {
+            lint: Lint::FeatureEnvy,
+            key: key.clone(),
+            message: format!(
+                "`{fn_name}` shows feature envy toward `{target_name}`: uses {} of it vs {} own",
+                counted(top_count, "item"),
+                own_items.len()
+            ),
+            location: item_location(model, holder),
+            notes: vec![format!(
+                "uses of `{target_name}`: {}",
+                listed(&member_names)
+            )],
+            picture: Picture::Arrow {
+                from: key,
+                to: target_full,
+                detail: format!(
+                    "uses {} distinct items of `{target_name}` vs {} own",
+                    top_count,
+                    own_items.len()
+                ),
+            },
+        });
+    }
+    diagnostics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::tests::Sample;
+
+    fn report(sample: &Sample) -> Vec<(Lint, String)> {
+        let graph = Graph::new(&sample.model);
+        check(&sample.model, &graph, None)
+            .into_iter()
+            .map(|d| (d.lint, d.key))
+            .collect()
+    }
+
+    #[test]
+    fn high_fan_out_counts_distinct_sibling_and_foreign_modules() {
+        let mut sample = Sample::new();
+        let hub = sample.module("hub");
+        let run = sample.item(hub, "run", ItemKind::Function);
+        for i in 0..MOST_FAN_OUT {
+            let dep = sample.module(&format!("dep{i}"));
+            let item = sample.item(dep, &format!("T{i}"), ItemKind::Type);
+            sample.refer(run, item);
+        }
+        // Direct child module does not count against fan-out.
+        let child = sample.module("hub::sub");
+        let child_item = sample.item(child, "Sub", ItemKind::Type);
+        sample.refer(run, child_item);
+        assert_eq!(report(&sample), Vec::<(Lint, String)>::new());
+
+        let extra = sample.module("dep_extra");
+        let extra_item = sample.item(extra, "Extra", ItemKind::Type);
+        sample.refer(run, extra_item);
+        assert_eq!(report(&sample), vec![(Lint::HighFanOut, "p::hub".into())]);
+    }
+
+    #[test]
+    fn feature_envy_flags_methods_reaching_deeply_into_one_foreign_type() {
+        let mut sample = Sample::new();
+        let (a, b) = (sample.module("a"), sample.module("b"));
+        let owner = sample.item(a, "Owner", ItemKind::Type);
+        let foreign = sample.item(b, "Target", ItemKind::Type);
+        let glue = sample.member(owner, a, "Owner::glue", ItemKind::Function);
+        for i in 0..MIN_ENVY_ITEMS {
+            let m = sample.member(foreign, b, &format!("Target::m{i}"), ItemKind::Function);
+            sample.refer(glue, m);
+        }
+        assert_eq!(
+            report(&sample),
+            vec![(Lint::FeatureEnvy, "p::a::Owner::glue".into())]
+        );
+    }
+}

@@ -11,6 +11,7 @@ mod uses;
 
 pub use uses::{Access, Plain};
 
+use crate::model::FunctionMetrics;
 use crate::scip::{Position, Range};
 use tokens::{Kind, Token};
 
@@ -203,10 +204,9 @@ impl Source {
         blocks
     }
 
-    /// The type name in the first non-`self` parameter of the function at
-    /// `item`, past references and [`HOLDERS`]: `Store` for
-    /// `fn insert(store: &mut Store, key: u32)`.
-    pub fn first_param_type(&self, item: Range) -> Option<Range> {
+    /// Structural info for a defined function: metrics plus the range of its
+    /// first non-`self` parameter's type name, if any.
+    pub fn function_info(&self, item: Range) -> Option<(FunctionMetrics, Option<Range>)> {
         let tokens = self.tokens_in(item)?;
         let fn_pos = tokens.iter().position(|t| self.is(*t, "fn"))?;
         let mut open = fn_pos + 2;
@@ -217,7 +217,52 @@ impl Source {
             return None;
         }
         let close = self.matching_in(tokens, open)?;
-        let params = &tokens[open + 1..close];
+        let param_tokens = &tokens[open + 1..close];
+        let params = self.count_non_self_params(param_tokens);
+        let first_type = self.first_param_type_in(param_tokens);
+
+        let last = tokens.len().checked_sub(1)?;
+        let branches = if self.is(tokens[last], "}") {
+            let mut depth = 0i32;
+            let body_open = (0..=last).rev().find(|&at| {
+                match tokens[at].kind {
+                    Kind::Close => depth += 1,
+                    Kind::Open => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            });
+            body_open.map_or(0, |bo| {
+                tokens[bo + 1..last]
+                    .iter()
+                    .filter(|t| {
+                        matches!(
+                            self.text(**t),
+                            "if" | "match" | "for" | "while" | "loop" | "&&" | "||"
+                        )
+                    })
+                    .count() as u32
+            })
+        } else {
+            0
+        };
+
+        let last_line = if item.end.column == 0 {
+            item.end.line
+        } else {
+            item.end.line + 1
+        };
+        Some((
+            FunctionMetrics {
+                lines: last_line.saturating_sub(item.start.line),
+                branches,
+                params,
+            },
+            first_type,
+        ))
+    }
+
+    fn first_param_type_in(&self, params: &[Token]) -> Option<Range> {
         let mut depth = 0i32;
         let end = params
             .iter()
@@ -235,6 +280,84 @@ impl Source {
         let colon = first.iter().position(|t| self.is(*t, ":"))?;
         let name = self.name_of(&first[colon + 1..])?;
         Some(self.range(name.start, name.end))
+    }
+
+    fn count_non_self_params(&self, params: &[Token]) -> u16 {
+        let mut count = 0u16;
+        let mut start = 0usize;
+        let mut depth = 0i32;
+        for (i, token) in params.iter().enumerate() {
+            match self.text(*token) {
+                "<" | "(" | "[" | "{" => depth += 1,
+                ">" | ")" | "]" | "}" => depth -= 1,
+                "," if depth == 0 => {
+                    if self.is_non_self_param(&params[start..i]) {
+                        count = count.saturating_add(1);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if self.is_non_self_param(&params[start..]) {
+            count = count.saturating_add(1);
+        }
+        count
+    }
+
+    fn is_non_self_param(&self, param: &[Token]) -> bool {
+        if param.is_empty() {
+            return false;
+        }
+        // Skip leading attributes on the parameter.
+        let mut slice = param;
+        while slice.first().is_some_and(|t| self.is(*t, "#")) {
+            let Some(open) = slice.iter().position(|t| self.is(*t, "[")) else {
+                break;
+            };
+            let Some(close) = self.matching_in(slice, open) else {
+                break;
+            };
+            slice = &slice[close + 1..];
+        }
+        if slice.is_empty() {
+            return false;
+        }
+        let colon = slice.iter().position(|t| self.is(*t, ":"));
+        let head = colon.map_or(slice, |c| &slice[..c]);
+        !head.iter().any(|t| self.is(*t, "self"))
+    }
+
+    /// Whether the type written at `item` has `#[derive(... Serialize ...)]`
+    /// or `#[derive(... Deserialize ...)]`.
+    pub fn has_serde_derive(&self, item: Range) -> bool {
+        let Some(tokens) = self.tokens_in(item) else {
+            return false;
+        };
+        let mut at = 0;
+        while at < tokens.len() {
+            if self.is(tokens[at], "#") && tokens.get(at + 1).is_some_and(|t| self.is(*t, "[")) {
+                let Some(close) = self.matching_in(tokens, at + 1) else {
+                    break;
+                };
+                let inner = &tokens[at + 2..close];
+                let is_derive = inner.first().is_some_and(|t| self.is(*t, "derive"));
+                if is_derive
+                    && inner
+                        .iter()
+                        .any(|t| matches!(self.text(*t), "Serialize" | "Deserialize"))
+                {
+                    return true;
+                }
+                at = close + 1;
+                continue;
+            }
+            if matches!(self.text(tokens[at]), "struct" | "enum" | "union") {
+                break;
+            }
+            at += 1;
+        }
+        false
     }
 
     /// What the text of the function written at `item` says about it, if it has a body.
@@ -679,7 +802,8 @@ pub use g::Item;\n";
     fn first_param_type_peels_references_and_skips_self() {
         let pick = |code: &str| {
             let source = Source::new(code.into());
-            let range = source.first_param_type(source.whole())?;
+            let (_, range) = source.function_info(source.whole())?;
+            let range = range?;
             let start = source.offset(range.start)?;
             let end = source.offset(range.end)?;
             Some(source.text[start..end].to_owned())
@@ -694,5 +818,24 @@ pub use g::Item;\n";
         );
         assert_eq!(pick("pub fn method(&self, k: u32) {}"), None);
         assert_eq!(pick("pub fn none() -> Result<(), Err> {}"), None);
+    }
+
+    #[test]
+    fn function_metrics_and_serde_derive_are_extracted() {
+        let code = "pub fn f(&self, a: u32, b: (u32, u32), c: u32) {\n\
+                    \x20   if a > 0 && b.0 > 0 {\n\
+                    \x20       for _ in 0..c {}\n\
+                    \x20   }\n\
+                    }\n";
+        let source = Source::new(code.into());
+        let (m, _) = source.function_info(source.whole()).unwrap();
+        assert_eq!((m.lines, m.branches, m.params), (5, 3, 3));
+
+        let dto = Source::new(
+            "#[derive(Debug, Serialize, Deserialize)]\npub struct Dto { a: u32 }".into(),
+        );
+        assert!(dto.has_serde_derive(dto.whole()));
+        let plain = Source::new("#[derive(Debug, Clone)]\npub struct Plain { a: u32 }".into());
+        assert!(!plain.has_serde_derive(plain.whole()));
     }
 }

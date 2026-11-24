@@ -23,6 +23,9 @@ struct Usage {
     /// `test`, `bench`) of the same package, which Cargo compiles as an
     /// external crate that cannot see `pub(crate)`.
     external_to_lib: bool,
+    /// Used from outside the item's own home module (and outside its submodule
+    /// subtree for non-root modules) within the same target.
+    outside_home: bool,
     internal_modules: BTreeMap<NodeId, usize>,
 }
 
@@ -33,17 +36,24 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
 
     for reference in &model.references {
         let target = reference.item;
-        let target_pkg = tree.package_of(model.items[target.index()].owner);
+        let target_item = &model.items[target.index()];
+        let target_pkg = tree.package_of(target_item.owner);
+        let target_file_target = target_item.file.and_then(|f| model.files[f.index()].target);
         let ref_file = &model.files[reference.file.index()];
         let ref_pkg = tree.package_of(ref_file.module);
         let external = ref_pkg != target_pkg || ref_file.target != Some(TargetKind::Library);
+        let same_target = ref_pkg == target_pkg && ref_file.target == target_file_target;
 
         // Item-level usage (ignore direct self-recursion).
         if reference.holder != Some(target) {
+            let item_home = home_of(model, graph, target);
+            let outside =
+                !same_target || is_outside_home(tree, reference.from, item_home, target_pkg);
             record(
                 &mut item_usage[target.index()],
                 reference.test,
                 external,
+                outside,
                 reference.from,
             );
         }
@@ -55,10 +65,14 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                 .holder
                 .and_then(|holder| graph.thing_of[holder.index()]);
             if holder_thing != Some(target_thing) {
+                let thing_home = graph.things[target_thing.index()].home;
+                let outside =
+                    !same_target || is_outside_home(tree, reference.from, thing_home, target_pkg);
                 record(
                     &mut thing_usage[target_thing.index()],
                     reference.test,
                     external,
+                    outside,
                     reference.from,
                 );
             }
@@ -84,11 +98,11 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let Some(usage) = usage_for(model, graph, id, &item_usage, &thing_usage) else {
             continue;
         };
-        if !usage.prod_used || !usage.external_to_lib {
+        if let Some(diag) = classify(model, graph, id, pkg, usage, scope) {
             suppressed_parents.insert(id);
-            if in_scope(tree, scope, home_of(model, graph, id)) {
-                diagnostics.push(build_diagnostic(model, graph, id, pkg, usage));
-            }
+            diagnostics.push(diag);
+        } else if is_over_scoped(model, id, usage) {
+            suppressed_parents.insert(id);
         }
     }
 
@@ -107,17 +121,55 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let Some(usage) = usage_for(model, graph, id, &item_usage, &thing_usage) else {
             continue;
         };
-        if (!usage.prod_used || !usage.external_to_lib)
-            && in_scope(tree, scope, home_of(model, graph, id))
-        {
-            diagnostics.push(build_diagnostic(model, graph, id, pkg, usage));
+        if let Some(diag) = classify(model, graph, id, pkg, usage, scope) {
+            diagnostics.push(diag);
         }
     }
 
     diagnostics
 }
 
-fn record(usage: &mut Usage, test: bool, external: bool, from: NodeId) {
+fn is_outside_home(
+    tree: &crate::model::Tree,
+    from: NodeId,
+    home: NodeId,
+    pkg: Option<NodeId>,
+) -> bool {
+    if from == home {
+        false
+    } else if Some(home) == pkg {
+        true
+    } else {
+        !tree.is_within(from, home)
+    }
+}
+
+fn is_over_scoped(model: &Model, id: ItemId, usage: &Usage) -> bool {
+    match model.items[id.index()].visibility {
+        Visibility::Pub => !usage.prod_used || !usage.external_to_lib,
+        Visibility::Restricted => usage.prod_used && !usage.outside_home,
+        Visibility::Private => false,
+    }
+}
+
+fn classify(
+    model: &Model,
+    graph: &Graph,
+    id: ItemId,
+    pkg: NodeId,
+    usage: &Usage,
+    scope: Option<NodeId>,
+) -> Option<Diagnostic> {
+    if !is_over_scoped(model, id, usage) {
+        return None;
+    }
+    if !in_scope(&model.tree, scope, home_of(model, graph, id)) {
+        return None;
+    }
+    Some(build_diagnostic(model, graph, id, pkg, usage))
+}
+
+fn record(usage: &mut Usage, test: bool, external: bool, outside_home: bool, from: NodeId) {
     if test {
         usage.test_used = true;
     } else {
@@ -129,12 +181,15 @@ fn record(usage: &mut Usage, test: bool, external: bool, from: NodeId) {
     if external {
         usage.external_to_lib = true;
     }
+    if outside_home {
+        usage.outside_home = true;
+    }
 }
 
 fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
     let tree = &model.tree;
     let item = &model.items[id.index()];
-    if item.visibility != Visibility::Pub || item.trait_impl || item.extern_abi {
+    if item.visibility == Visibility::Private || item.trait_impl || item.extern_abi {
         return None;
     }
     if !matches!(
@@ -145,7 +200,10 @@ fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
     }
     let file = item.file?;
     let file_info = &model.files[file.index()];
-    if file_info.test || file_info.target != Some(TargetKind::Library) || tree.is_test(item.owner) {
+    if file_info.test || tree.is_test(item.owner) {
+        return None;
+    }
+    if item.visibility == Visibility::Pub && file_info.target != Some(TargetKind::Library) {
         return None;
     }
     let pkg = tree.package_of(item.owner)?;
@@ -154,7 +212,7 @@ fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
     }
     if let Some(parent) = item.parent {
         let parent_item = &model.items[parent.index()];
-        if parent_item.kind != ItemKind::Type || parent_item.visibility != Visibility::Pub {
+        if parent_item.kind != ItemKind::Type || parent_item.visibility < item.visibility {
             return None;
         }
     }
@@ -197,7 +255,24 @@ fn build_diagnostic(
     let key = format!("{}::{name}", tree.display(home));
     let location = item_location(model, id);
 
-    if !usage.prod_used {
+    if item.visibility == Visibility::Restricted {
+        let home_name = tree.display(home);
+        Diagnostic {
+            lint: Lint::OverPublic,
+            key: key.clone(),
+            message: format!(
+                "`{name}` is `pub(crate)`/`pub(super)` but only used inside `{home_name}`"
+            ),
+            location,
+            notes: vec![format!("narrow `{name}` to private")],
+            picture: Picture::Arrow {
+                from: key,
+                to: home_name,
+                detail: "only referenced inside its own module subtree (narrow to private)"
+                    .to_owned(),
+            },
+        }
+    } else if !usage.prod_used {
         let reason = if usage.test_used {
             "only used in tests"
         } else {
