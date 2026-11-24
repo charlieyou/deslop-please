@@ -52,6 +52,7 @@ usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]
        [--no-default-features]
 
 Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,
+wide-type, scattered-impl, unused-pub, over-public, pass-through,
 wide-directory, long-file) on the Cargo workspace.
 
 options:

@@ -273,6 +273,7 @@ mod tests {
             lent: if copies { vec![] } else { vec![head] },
             copied: if copies { vec![head] } else { vec![] },
             to_read: true,
+            whole: false,
         };
         sample.model.wrappers.insert(getter, hands_out(false));
         let drained = sample.item(queue, "drained", ItemKind::Function);
@@ -299,6 +300,7 @@ mod tests {
             lent: vec![head],
             copied: vec![],
             to_read: true,
+            whole: false,
         };
         sample.model.wrappers.insert(getter, lends);
         // `*queue.head()`

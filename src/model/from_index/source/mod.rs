@@ -46,6 +46,14 @@ pub struct Source {
     tokens: Vec<Token>,
 }
 
+/// A `pub use <path>::*;` glob re-export as written in a file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GlobUse {
+    pub range: Range,
+    pub line: u32,
+    pub path: String,
+}
+
 /// An `impl` block as its text writes it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ImplBlock {
@@ -132,6 +140,47 @@ impl Source {
         declarations
     }
 
+    /// Every plain `pub use ...::*;` glob re-export in the file.
+    pub fn glob_reexports(&self) -> Vec<GlobUse> {
+        let tokens = &self.tokens;
+        let mut globs = Vec::new();
+        for (at, token) in tokens.iter().enumerate() {
+            let precise_capture = tokens.get(at + 1).is_some_and(|next| self.is(*next, "<"));
+            if !self.is(*token, "use") || precise_capture {
+                continue;
+            }
+            // Only plain `pub use` (not `pub(crate) use` or private `use`).
+            if at == 0 || !self.is(tokens[at - 1], "pub") {
+                continue;
+            }
+            let Some(semi) = tokens[at..].iter().position(|t| self.is(*t, ";")) else {
+                continue;
+            };
+            let body = &tokens[at + 1..at + semi];
+            if !body.iter().any(|t| self.is(*t, "*")) {
+                continue;
+            }
+            let range = self.range(tokens[at - 1].start, tokens[at + semi].end);
+            let mut path = String::new();
+            for &tok in body {
+                let text = self.text(tok);
+                if text == "*" || text == "{" {
+                    break;
+                }
+                path.push_str(text);
+            }
+            let path = path.trim_end_matches("::").to_owned();
+            if !path.is_empty() {
+                globs.push(GlobUse {
+                    range,
+                    line: range.start.line + 1,
+                    path,
+                });
+            }
+        }
+        globs
+    }
+
     /// Every `impl` block, in order.
     pub fn impl_blocks(&self) -> Vec<ImplBlock> {
         let tokens = &self.tokens;
@@ -152,6 +201,40 @@ impl Source {
             });
         }
         blocks
+    }
+
+    /// The type name in the first non-`self` parameter of the function at
+    /// `item`, past references and [`HOLDERS`]: `Store` for
+    /// `fn insert(store: &mut Store, key: u32)`.
+    pub fn first_param_type(&self, item: Range) -> Option<Range> {
+        let tokens = self.tokens_in(item)?;
+        let fn_pos = tokens.iter().position(|t| self.is(*t, "fn"))?;
+        let mut open = fn_pos + 2;
+        if tokens.get(open).is_some_and(|t| self.is(*t, "<")) {
+            open = self.past_angles_in(tokens, open);
+        }
+        if !tokens.get(open).is_some_and(|t| self.is(*t, "(")) {
+            return None;
+        }
+        let close = self.matching_in(tokens, open)?;
+        let params = &tokens[open + 1..close];
+        let mut depth = 0i32;
+        let end = params
+            .iter()
+            .position(|t| {
+                match self.text(*t) {
+                    "<" | "(" | "[" | "{" => depth += 1,
+                    ">" | ")" | "]" | "}" => depth -= 1,
+                    "," if depth == 0 => return true,
+                    _ => {}
+                }
+                false
+            })
+            .unwrap_or(params.len());
+        let first = &params[..end];
+        let colon = first.iter().position(|t| self.is(*t, ":"))?;
+        let name = self.name_of(&first[colon + 1..])?;
+        Some(self.range(name.start, name.end))
     }
 
     /// What the text of the function written at `item` says about it, if it has a body.
@@ -576,5 +659,40 @@ mod tests {
         );
         let field = Source::new("doomed: core::sync::atomic::AtomicBool".into());
         assert_eq!(field.field_types(field.whole()), [["AtomicBool"], ["bool"]]);
+    }
+
+    #[test]
+    fn glob_reexports_only_match_plain_pub_use_with_star() {
+        let text = "\
+use a::*;\n\
+pub(crate) use b::*;\n\
+pub use c::*;\n\
+pub use d::e::*;\n\
+pub use f::{x, *};\n\
+pub use g::Item;\n";
+        let globs = Source::new(text.into()).glob_reexports();
+        let summary: Vec<(u32, &str)> = globs.iter().map(|g| (g.line, g.path.as_str())).collect();
+        assert_eq!(summary, [(3, "c"), (4, "d::e"), (5, "f")]);
+    }
+
+    #[test]
+    fn first_param_type_peels_references_and_skips_self() {
+        let pick = |code: &str| {
+            let source = Source::new(code.into());
+            let range = source.first_param_type(source.whole())?;
+            let start = source.offset(range.start)?;
+            let end = source.offset(range.end)?;
+            Some(source.text[start..end].to_owned())
+        };
+        assert_eq!(
+            pick("pub fn insert(store: &mut crate::Store, k: u32) -> Result<(), Err> {}"),
+            Some("Store".into())
+        );
+        assert_eq!(
+            pick("pub fn inspect(s: &Box<Store>) {}"),
+            Some("Store".into())
+        );
+        assert_eq!(pick("pub fn method(&self, k: u32) {}"), None);
+        assert_eq!(pick("pub fn none() -> Result<(), Err> {}"), None);
     }
 }

@@ -38,6 +38,7 @@ pub fn draw(picture: &Picture, paint: &Paint) -> Vec<String> {
             length,
             most,
         } => bars(&[(label, *length, true)], *most, paint),
+        Picture::Arrow { from, to, detail } => arrow(from, to, detail, paint),
     };
     lines
         .into_iter()
@@ -135,6 +136,20 @@ fn spread(
         ));
     }
     lines.extend(others.iter().map(|other| format!("  {other}")));
+    lines
+}
+
+/// One item forwarding or duplicating another: `from  ━━▶  to` with a short
+/// reason under it.
+fn arrow(from: &str, to: &str, detail: &str, paint: &Paint) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  {}  {to}",
+        paint.bold(from),
+        paint.error("━━▶")
+    )];
+    if !detail.is_empty() {
+        lines.push(format!("  {detail}"));
+    }
     lines
 }
 
@@ -289,6 +304,22 @@ mod tests {
             [
                 "                            2000",
                 "    lines  ████████████████████│████████████████████⋯ 9000",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_arrow_points_from_the_shim_to_what_it_forwards_or_exposes() {
+        let arrow = Picture::Arrow {
+            from: "p::Canon::engine".into(),
+            to: "engine".into(),
+            detail: "redundant accessor beside exposed field".into(),
+        };
+        assert_eq!(
+            plain(&arrow),
+            [
+                "    p::Canon::engine  ━━▶  engine",
+                "      redundant accessor beside exposed field",
             ]
         );
     }

@@ -681,3 +681,192 @@ fn outside_a_cargo_workspace_reports_error() {
     assert_eq!(run.code, Some(2));
     assert!(run.stderr.contains("not inside a Cargo workspace"));
 }
+
+/// Creates a fresh temporary Cargo workspace with `files` (path -> contents).
+fn scratch_workspace(test: &str, files: &[(&str, &str)]) -> PathBuf {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    for &(rel, contents) in files {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+    root
+}
+
+#[test]
+fn wide_type_flags_bloated_types_and_ignores_passive_error_types() {
+    let mut store_rs = String::from(
+        "pub struct Err;\n\
+         pub struct God { secret: u32 }\n\
+         impl God {\n\
+             pub fn new() -> Self { Self { secret: 0 } }\n\
+             fn hidden(&self) -> u32 { self.secret + 1 }\n",
+    );
+    let mut call_body = String::from("let g = store::God::new();\nlet mut sum = 0u32;\n");
+    for i in 1..=15 {
+        store_rs.push_str(&format!(
+            "    pub fn m{i}(&self) -> Result<u32, Err> {{ Ok(self.hidden() + {i}) }}\n"
+        ));
+        call_body.push_str(&format!("sum += g.m{i}().unwrap_or(0);\n"));
+    }
+    store_rs.push_str("}\n");
+    for i in 1..=16 {
+        store_rs.push_str(&format!(
+            "pub fn check{i}(x: u32) -> Result<u32, Err> {{ if x > 0 {{ Ok(x + {i}) }} else {{ Err(Err) }} }}\n"
+        ));
+        call_body.push_str(&format!("sum += store::check{i}(1).unwrap_or(0);\n"));
+    }
+    call_body.push_str("sum\n");
+
+    let ws = scratch_workspace(
+        "wide_type_e2e",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"wide\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            (
+                "src/lib.rs",
+                &format!("mod store;\npub fn drive() -> u32 {{\n{call_body}}}\n"),
+            ),
+            ("src/store.rs", &store_rs),
+        ],
+    );
+    let report = run(&ws, &[]);
+    assert_eq!(report.code, Some(1));
+    assert!(report.stdout.contains("error[wide-type]: `God` is wide"));
+    assert!(!report.stdout.contains("`Err` is wide"));
+    assert_eq!(keys(&ws), ["wide-type wide::store::God"]);
+}
+
+#[test]
+fn scattered_impl_flags_sibling_impls_but_allows_home_submodules() {
+    let ws = scratch_workspace(
+        "scattered_impl_e2e",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"scat\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", "mod admin;\nmod home;\nmod local;\n"),
+            (
+                "src/home.rs",
+                "pub struct Store { pub(crate) count: usize }\n\
+                 impl Store { pub fn new() -> Self { Self { count: 0 } } }\n",
+            ),
+            (
+                "src/admin.rs",
+                "use crate::home::Store;\n\
+                 impl Store { pub fn reset(&mut self) { self.count = 0; } }\n",
+            ),
+            (
+                "src/local/mod.rs",
+                "mod sub;\n\
+                 pub struct Local { count: usize }\n\
+                 impl Local { pub fn new() -> Self { Self { count: 0 } } }\n",
+            ),
+            (
+                "src/local/sub.rs",
+                "use super::Local;\n\
+                 impl Local { pub fn inc(&mut self) { self.count += 1; } }\n",
+            ),
+        ],
+    );
+    assert_eq!(keys(&ws), ["scattered-impl scat::home::Store"]);
+}
+
+#[test]
+fn visibility_lints_catch_unused_pub_and_over_public_in_private_crates() {
+    let ws = scratch_workspace(
+        "visibility_e2e",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"app\", \"core\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core_lib\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+            ),
+            (
+                "core/src/lib.rs",
+                "pub fn dead() -> u32 { 1 }\n\
+                 pub fn test_only() -> u32 { 2 }\n\
+                 pub fn internal_only() -> u32 { 3 }\n\
+                 pub fn shared() -> u32 { internal_only() + 1 }\n\
+                 pub fn it_used() -> u32 { internal_only() + 2 }\n\
+                 #[cfg(test)]\nmod tests {\n\
+                     #[test]\nfn t() { assert_eq!(super::test_only(), 2); }\n\
+                 }\n",
+            ),
+            (
+                "core/tests/it.rs",
+                "#[test]\nfn uses_it() { assert_eq!(core_lib::it_used(), 5); }\n",
+            ),
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+                 [dependencies]\ncore_lib = { path = \"../core\" }\n",
+            ),
+            (
+                "app/src/main.rs",
+                "fn main() { let _ = core_lib::shared(); }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        keys(&ws),
+        [
+            "over-public core_lib::internal_only",
+            "unused-pub core_lib::dead",
+            "unused-pub core_lib::it_used",
+            "unused-pub core_lib::test_only",
+        ]
+    );
+}
+
+#[test]
+fn pass_through_catches_shims_and_glob_reexports_but_spares_builders_and_private_splits() {
+    let ws = scratch_workspace(
+        "pass_through_e2e",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"shims\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            (
+                "src/lib.rs",
+                "mod parts;\n\
+                 pub mod exposed;\n\
+                 pub use parts::*;\n\
+                 pub use exposed::*;\n\
+                 pub struct Inner { x: u32 }\n\
+                 impl Inner { pub fn bump(&mut self, n: u32) { self.x += n; } }\n\
+                 pub struct Holder { pub inner: Inner, secret: Inner, pub flag: bool }\n\
+                 impl Holder {\n\
+                     pub fn flag(&self) -> bool { self.flag }\n\
+                     pub fn with_flag(mut self, flag: bool) -> Self { self.flag = flag; self }\n\
+                     pub fn bump_inner(&mut self, n: u32) { self.inner.bump(n) }\n\
+                     pub fn bump_secret(&mut self, n: u32) { self.secret.bump(n) }\n\
+                     pub fn alias_bump(&mut self, n: u32) { self.bump_secret(n) }\n\
+                 }\n",
+            ),
+            ("src/parts.rs", "pub struct SplitPart;\n"),
+            ("src/exposed.rs", "pub struct DupPart;\n"),
+        ],
+    );
+    assert_eq!(
+        keys(&ws),
+        [
+            "pass-through shims::Holder::alias_bump",
+            "pass-through shims::Holder::bump_inner",
+            "pass-through shims::Holder::flag",
+            "pass-through shims::exposed::*",
+        ]
+    );
+}

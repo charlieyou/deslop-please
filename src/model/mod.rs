@@ -11,6 +11,8 @@ pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::HashMap;
 
+use crate::workspace::TargetKind;
+
 #[derive(Debug, Default)]
 pub struct Model {
     pub tree: Tree,
@@ -21,6 +23,32 @@ pub struct Model {
     pub references: Vec<Reference>,
     /// What each wrapper hands on. No chain of forwarders loops.
     pub wrappers: HashMap<ItemId, Wrapper>,
+    /// `pub use <path>::*;` glob re-exports written in the workspace.
+    pub glob_reexports: Vec<GlobReexport>,
+}
+
+/// An item's declared visibility, ordered from narrowest to widest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Visibility {
+    #[default]
+    Private,
+    /// `pub(crate)`, `pub(super)`, or `pub(in ...)`.
+    Restricted,
+    /// Plain `pub`.
+    Pub,
+}
+
+/// A `pub use <path>::*;` declaration written in a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobReexport {
+    pub file: FileId,
+    pub line: u32,
+    pub from: NodeId,
+    /// The path written before `::*`.
+    pub path: String,
+    /// The target module if it is a workspace module.
+    pub target: Option<NodeId>,
+    pub test: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -35,6 +63,7 @@ pub struct File {
     pub path: String,
     pub module: NodeId,
     pub test: bool,
+    pub target: Option<TargetKind>,
     /// Every line of its text, blank and comment lines too.
     pub lines: usize,
 }
@@ -48,16 +77,26 @@ pub struct Item {
     /// The module it is, for a module.
     pub module: Option<NodeId>,
     pub file: Option<FileId>,
+    /// 1-based line of its definition, or 0 if not known.
+    pub line: u32,
     pub kind: ItemKind,
     /// What it is written for: a type, for its fields, variants, associated
     /// items and methods, wherever their `impl` block is; a variant, for its
     /// fields. `None` for a free item, and for what an `impl` block of a type
     /// the crate does not define holds.
     pub parent: Option<ItemId>,
+    /// For a free function: the workspace type of its first parameter, if it
+    /// names one (so `fn op(store: &mut Store, ..)` is attributed to `Store`).
+    pub first_param_type: Option<ItemId>,
+    pub visibility: Visibility,
     /// A function of a trait's `impl` block.
     pub trait_impl: bool,
     /// A function with a `self` parameter.
     pub takes_self: bool,
+    /// A function declared `unsafe fn`.
+    pub is_unsafe: bool,
+    /// An item declared with an explicit `extern "..."` ABI.
+    pub extern_abi: bool,
     /// A field of a marker type, `PhantomData` or `PhantomPinned`, which
     /// holds nothing.
     pub holds_nothing: bool,
@@ -106,11 +145,13 @@ pub enum Wrapper {
     /// are those it lends or overwrites, `copied` those whose values it only
     /// hands out. `to_read`: it takes `&self` and overwrites nothing, so
     /// what it lends can only be read, and code that calls it does with the
-    /// fields what it does with the call.
+    /// fields what it does with the call. `whole`: takes `self` by value
+    /// (e.g. a consuming builder `fn with_x(mut self, x: X) -> Self`).
     Accessor {
         lent: Vec<ItemId>,
         copied: Vec<ItemId>,
         to_read: bool,
+        whole: bool,
     },
 }
 
@@ -169,6 +210,7 @@ pub mod tests {
                     path: format!("src/{}.rs", path.replace("::", "/")),
                     module: node,
                     test: false,
+                    target: Some(TargetKind::Library),
                     lines: 1,
                 });
             }
@@ -181,6 +223,7 @@ pub mod tests {
                 path: path.into(),
                 module,
                 test: false,
+                target: Some(TargetKind::Library),
                 lines,
             });
         }
@@ -196,10 +239,15 @@ pub mod tests {
                 owner,
                 module: None,
                 file: file.map(FileId::new),
+                line: 1,
                 kind,
                 parent: None,
+                first_param_type: None,
+                visibility: Visibility::Private,
                 trait_impl: false,
                 takes_self: false,
+                is_unsafe: false,
+                extern_abi: false,
                 holds_nothing: false,
             });
             ItemId::new(self.model.items.len() - 1)

@@ -6,8 +6,12 @@
 mod cycles;
 mod layout;
 mod leaks;
+mod pass_through;
+mod scattered_impl;
 mod shallow;
 mod tangles;
+mod visibility;
+mod wide_type;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -28,6 +32,11 @@ pub enum Lint {
     Tangle,
     FieldLeak,
     ShallowModule,
+    WideType,
+    ScatteredImpl,
+    UnusedPub,
+    OverPublic,
+    PassThrough,
     WideDirectory,
     LongFile,
 }
@@ -39,6 +48,11 @@ impl Lint {
             Lint::Tangle => "tangle",
             Lint::FieldLeak => "field-leak",
             Lint::ShallowModule => "shallow-module",
+            Lint::WideType => "wide-type",
+            Lint::ScatteredImpl => "scattered-impl",
+            Lint::UnusedPub => "unused-pub",
+            Lint::OverPublic => "over-public",
+            Lint::PassThrough => "pass-through",
             Lint::WideDirectory => "wide-directory",
             Lint::LongFile => "long-file",
         }
@@ -50,6 +64,11 @@ impl Lint {
             "tangle" => Some(Lint::Tangle),
             "field-leak" => Some(Lint::FieldLeak),
             "shallow-module" => Some(Lint::ShallowModule),
+            "wide-type" => Some(Lint::WideType),
+            "scattered-impl" => Some(Lint::ScatteredImpl),
+            "unused-pub" => Some(Lint::UnusedPub),
+            "over-public" => Some(Lint::OverPublic),
+            "pass-through" => Some(Lint::PassThrough),
             "wide-directory" => Some(Lint::WideDirectory),
             "long-file" => Some(Lint::LongFile),
             _ => None,
@@ -108,6 +127,12 @@ pub enum Picture {
         length: usize,
         most: usize,
     },
+    /// One item that only forwards to, duplicates, or exposes another.
+    Arrow {
+        from: String,
+        to: String,
+        detail: String,
+    },
 }
 
 /// A member of a circle, and its tie to the next one.
@@ -127,6 +152,10 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     diagnostics.extend(tangles::check(model, &graph, scope));
     diagnostics.extend(leaks::check(model, &graph, scope));
     diagnostics.extend(shallow::check(model, &graph, scope));
+    diagnostics.extend(wide_type::check(model, &graph, scope));
+    diagnostics.extend(scattered_impl::check(model, &graph, scope));
+    diagnostics.extend(visibility::check(model, &graph, scope));
+    diagnostics.extend(pass_through::check(model, &graph, scope));
     diagnostics.extend(layout::check(model, scope));
     diagnostics.sort_by(|a, b| a.lint.cmp(&b.lint).then_with(|| a.key.cmp(&b.key)));
     diagnostics
@@ -380,6 +409,16 @@ fn without_generics(name: &str) -> String {
         }
     }
     out
+}
+
+/// Where `item` is defined, if the index recorded its file.
+fn item_location(model: &Model, item: ItemId) -> Option<Location> {
+    let item = &model.items[item.index()];
+    let file = item.file?;
+    Some(Location {
+        file: model.files[file.index()].path.clone(),
+        line: item.line.max(1),
+    })
 }
 
 /// The first line of `module`'s primary non-test file, if it has one.

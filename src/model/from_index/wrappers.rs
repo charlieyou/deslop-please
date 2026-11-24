@@ -87,6 +87,7 @@ impl<'a> Builder<'a> {
             lent,
             copied,
             to_read: text.lends_to_read,
+            whole: text.whole,
         })
     }
 

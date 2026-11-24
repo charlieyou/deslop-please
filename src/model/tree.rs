@@ -22,6 +22,8 @@ pub struct Node {
     pub depth: u32,
     /// Test code, and so is everything inside it (`Tree::is_test`).
     pub test: bool,
+    /// For a package node: whether Cargo allows publishing it (`false` for `publish = false`).
+    pub publish: bool,
 }
 
 #[derive(Debug)]
@@ -45,6 +47,7 @@ impl Tree {
             parent: None,
             depth: 0,
             test: false,
+            publish: true,
         };
         Tree {
             nodes: vec![root],
@@ -70,6 +73,7 @@ impl Tree {
             parent: Some(parent),
             depth: parent_node.depth + 1,
             test: false,
+            publish: true,
         });
         self.children.insert(key, id);
         id

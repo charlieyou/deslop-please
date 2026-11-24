@@ -12,12 +12,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{
-    File, FileId, Item, ItemId, ItemKind, Model, NodeId, NodeKind, Reference, Tree, Wrapper,
+    File, FileId, GlobReexport, Item, ItemId, ItemKind, Model, NodeId, NodeKind, Reference, Tree,
+    Visibility, Wrapper,
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
 use blocks::Blocks;
-use source::{Access, ImplBlock, Plain, Source};
+use source::{Access, GlobUse, ImplBlock, Plain, Source};
 
 pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
     let mut builder = Builder::new(workspace);
@@ -37,6 +38,7 @@ struct Builder<'a> {
     files: Vec<File>,
     items: Vec<Item>,
     references: Vec<Reference>,
+    glob_reexports: Vec<GlobReexport>,
     /// By the place of each reference in `references`: what its code does
     /// with what it names.
     accesses: Vec<Access>,
@@ -85,6 +87,7 @@ impl<'a> Builder<'a> {
             files: Vec::new(),
             items: Vec::new(),
             references: Vec::new(),
+            glob_reexports: Vec::new(),
             accesses: Vec::new(),
             packages: HashMap::new(),
             target_roots: HashMap::new(),
@@ -103,6 +106,7 @@ impl<'a> Builder<'a> {
         self.read_symbol_information(index);
         self.mark_test_code();
         self.place_in_types();
+        self.mark_first_param_types();
         self.mark_copies();
         self.mark_markers();
         let wrappers = self.wrappers();
@@ -113,6 +117,7 @@ impl<'a> Builder<'a> {
             items: self.items,
             references: self.references,
             wrappers,
+            glob_reexports: self.glob_reexports,
         }
     }
 
@@ -136,6 +141,7 @@ impl<'a> Builder<'a> {
                 self.tree
                     .child(parent, NodeKind::Package, &package.crate_name)
             };
+            self.tree.node_mut(node).publish = package.publish;
             placed.push((&package.directory, node));
             self.packages
                 .insert((&package.name, &package.version), node);
@@ -170,6 +176,7 @@ impl<'a> Builder<'a> {
             path: document.path.to_string(),
             module,
             test: false,
+            target: None,
             lines,
         });
         let at = self.units.len();
@@ -218,13 +225,42 @@ impl<'a> Builder<'a> {
             declared_modules,
         };
         let imports = unit.source.use_declarations();
+        let globs = unit.source.glob_reexports();
         // A reference to the file's module is no name its code writes.
         let skip = usize::from(!first.definition);
         for occurrence in &document.occurrences[skip..] {
             self.add_definition_or_reference(occurrence, &unit, module, &imports)?;
         }
+        self.add_glob_reexports(&unit, module, &globs);
         self.units.push(unit);
         Ok(())
+    }
+
+    fn add_glob_reexports(&mut self, unit: &Unit, module: NodeId, globs: &[GlobUse]) {
+        for glob in globs {
+            let from = unit.inline_modules.innermost(glob.range).unwrap_or(module);
+            let target = unit
+                .document
+                .occurrences
+                .iter()
+                .filter(|o| !o.definition && glob.range.holds(o.range))
+                .filter_map(|o| match self.symbols.get(o.symbol) {
+                    Some(&Named::Item(item)) => {
+                        self.items[item.index()].module.map(|m| (o.range.start, m))
+                    }
+                    _ => None,
+                })
+                .max_by_key(|&(start, _)| start)
+                .map(|(_, m)| m);
+            self.glob_reexports.push(GlobReexport {
+                file: unit.file,
+                line: glob.line,
+                from,
+                path: glob.path.clone(),
+                target,
+                test: false,
+            });
+        }
     }
 
     /// `imports`: where the unit's `use` declarations are, in order.
@@ -239,7 +275,11 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         if occurrence.definition {
-            self.items[item.index()].file.get_or_insert(unit.file);
+            let entry = &mut self.items[item.index()];
+            if entry.file.is_none() {
+                entry.file = Some(unit.file);
+                entry.line = occurrence.range.start.line + 1;
+            }
             return Ok(());
         }
         let before = imports.partition_point(|import| import.start <= occurrence.range.start);
@@ -266,6 +306,41 @@ impl<'a> Builder<'a> {
         };
         self.accesses.push(access);
         Ok(())
+    }
+
+    /// Records the workspace type of each free function's first parameter.
+    fn mark_first_param_types(&mut self) {
+        let mut found = Vec::new();
+        for (&item, &definition) in &self.definitions {
+            let entry = &self.items[item.index()];
+            if entry.kind != ItemKind::Function || entry.parent.is_some() {
+                continue;
+            }
+            let Some((at, range)) = definition else {
+                continue;
+            };
+            let unit = &self.units[at];
+            let Some(type_range) = unit.source.first_param_type(range) else {
+                continue;
+            };
+            let ty = unit
+                .document
+                .occurrences
+                .iter()
+                .find(|o| o.range == type_range && !o.definition)
+                .and_then(|o| match self.symbols.get(o.symbol) {
+                    Some(&Named::Item(ty)) if self.items[ty.index()].kind == ItemKind::Type => {
+                        Some(ty)
+                    }
+                    _ => None,
+                });
+            if let Some(ty) = ty {
+                found.push((item, ty));
+            }
+        }
+        for (item, ty) in found {
+            self.items[item.index()].first_param_type = Some(ty);
+        }
     }
 
     /// Marks the references to fields that only read the field's value: a
@@ -375,10 +450,15 @@ impl<'a> Builder<'a> {
                 owner,
                 module: Some(module),
                 file: None,
+                line: 0,
                 kind: ItemKind::Module,
                 parent: None,
+                first_param_type: None,
+                visibility: Visibility::Private,
                 trait_impl: false,
                 takes_self: false,
+                is_unsafe: false,
+                extern_abi: false,
                 holds_nothing: false,
             });
             return Some(id);
@@ -395,10 +475,15 @@ impl<'a> Builder<'a> {
             owner,
             module: None,
             file: None,
+            line: 0,
             kind,
             parent: None,
+            first_param_type: None,
+            visibility: Visibility::Private,
             trait_impl,
             takes_self: false,
+            is_unsafe: false,
+            extern_abi: false,
             holds_nothing: false,
         });
         if symbol.is_function() {
@@ -416,6 +501,14 @@ impl<'a> Builder<'a> {
             let item = &mut self.items[id.index()];
             if item.module.is_none() && item.kind != ItemKind::Impl {
                 item.kind = item_kind(information.kind);
+            }
+            if !information.signature.is_empty() {
+                let (visibility, is_unsafe, extern_abi) = parse_signature(information.signature);
+                if visibility > item.visibility {
+                    item.visibility = visibility;
+                }
+                item.is_unsafe |= is_unsafe;
+                item.extern_abi |= extern_abi;
             }
         }
     }
@@ -453,7 +546,9 @@ impl<'a> Builder<'a> {
             .collect();
         let kinds = targets::assign(&target_units, &roots, &self.tree);
         for (unit, kind) in self.units.iter().zip(kinds) {
-            self.files[unit.file.index()].test = kind.is_some_and(|kind| kind.is_test());
+            let file = &mut self.files[unit.file.index()];
+            file.target = kind;
+            file.test = kind.is_some_and(|kind| kind.is_test());
         }
         // A module that is defined only in test or bench targets is test code
         // even when its name is not `tests`, `*_tests` or `test_*`. Otherwise
@@ -501,6 +596,9 @@ impl<'a> Builder<'a> {
             reference.test =
                 self.files[reference.file.index()].test || self.tree.is_test(reference.from);
         }
+        for glob in &mut self.glob_reexports {
+            glob.test = self.files[glob.file.index()].test || self.tree.is_test(glob.from);
+        }
     }
 
     /// The modules declared `#[cfg(test)] mod name;` or the like, whatever
@@ -523,6 +621,46 @@ impl<'a> Builder<'a> {
         for_tests.retain(|module| !built.contains(module));
         for_tests
     }
+}
+
+fn parse_signature(signature: &str) -> (Visibility, bool, bool) {
+    let mut header = signature.trim_start();
+    while header.starts_with("#[") {
+        let Some(end) = header.find(']') else {
+            break;
+        };
+        header = header[end + 1..].trim_start();
+    }
+    let (visibility, rest) = if let Some(after) = header.strip_prefix("pub(") {
+        let after = after.find(')').map_or(after, |close| &after[close + 1..]);
+        (Visibility::Restricted, after)
+    } else if let Some(after) = header
+        .strip_prefix("pub")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+    {
+        (Visibility::Pub, after)
+    } else {
+        (Visibility::Private, header)
+    };
+    let before_args = rest.split(['(', '{', ';', '=']).next().unwrap_or(rest);
+    let mut words = before_args.split_whitespace();
+    let mut is_unsafe = false;
+    let mut extern_abi = false;
+    while let Some(word) = words.next() {
+        match word {
+            "unsafe" => is_unsafe = true,
+            "extern"
+                if words
+                    .clone()
+                    .next()
+                    .is_some_and(|next| next.starts_with('"')) =>
+            {
+                extern_abi = true;
+            }
+            _ => {}
+        }
+    }
+    (visibility, is_unsafe, extern_abi)
 }
 
 fn item_kind(kind: u64) -> ItemKind {
@@ -614,6 +752,7 @@ mod tests {
             version: "0.1.0".into(),
             crate_name: name.into(),
             directory: directory.into(),
+            publish: true,
             targets: Vec::new(),
         };
         let workspace = Workspace {
@@ -685,5 +824,29 @@ mod tests {
         assert!(is_test_module("test_machine"));
         assert!(!is_test_module("contests"));
         assert!(!is_test_module("testing"));
+    }
+
+    #[test]
+    fn signature_visibility_unsafe_and_extern_abi_are_parsed() {
+        assert_eq!(
+            parse_signature("pub fn run(&self)"),
+            (Visibility::Pub, false, false)
+        );
+        assert_eq!(
+            parse_signature("pub(crate) unsafe fn poke()"),
+            (Visibility::Restricted, true, false)
+        );
+        assert_eq!(
+            parse_signature("pub extern \"C\" fn hook()"),
+            (Visibility::Pub, false, true)
+        );
+        assert_eq!(
+            parse_signature("#[inline]\npub struct Foo"),
+            (Visibility::Pub, false, false)
+        );
+        assert_eq!(
+            parse_signature("fn helper()"),
+            (Visibility::Private, false, false)
+        );
     }
 }
