@@ -183,6 +183,19 @@ pub struct File {
     pub target: Option<TargetKind>,
     /// Every line of its text, blank and comment lines too.
     pub lines: usize,
+    /// The items its `cfg` attributes build only for tests.
+    pub for_tests: Vec<ForTests>,
+    /// Its first lines mark it `@generated`: a tool writes it.
+    pub generated: bool,
+}
+
+/// An item built only for tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForTests {
+    /// Its first and last lines, 1-based, from its first attribute.
+    pub lines: (u32, u32),
+    /// It is a module with its body inline, `mod name { .. }`.
+    pub inline_module: bool,
 }
 
 #[derive(Debug)]
@@ -349,6 +362,8 @@ pub mod tests {
                     test: false,
                     target: Some(TargetKind::Library),
                     lines: 1,
+                    for_tests: Vec::new(),
+                    generated: false,
                 });
             }
             node
@@ -362,6 +377,8 @@ pub mod tests {
                 test: false,
                 target: Some(TargetKind::Library),
                 lines,
+                for_tests: Vec::new(),
+                generated: false,
             });
         }
 

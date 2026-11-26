@@ -32,6 +32,18 @@ pub struct Settings {
     pub high_fan_out: HighFanOut,
     /// Which structs guard their fields, and who is inside them.
     pub field_leak: FieldLeak,
+    /// Which lines of a file count.
+    pub long_file: LongFile,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct LongFile {
+    /// A test module inline in the file, `#[cfg(test)] mod tests { .. }`,
+    /// counts no lines.
+    pub skip_test_modules: bool,
+    /// A file whose first lines mark it `@generated` is not measured.
+    pub skip_generated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

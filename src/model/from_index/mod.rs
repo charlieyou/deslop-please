@@ -47,6 +47,9 @@ pub fn outside_uses(index: &Index, workspace: &Workspace) -> Result<Vec<(String,
     Ok(builder.outside_uses())
 }
 
+/// How many of a file's first lines may mark it `@generated`.
+const GENERATED_MARK_WITHIN: usize = 5;
+
 fn is_test_module(name: &str) -> bool {
     name == "tests" || name == "test" || name.ends_with("_tests") || name.starts_with("test_")
 }
@@ -383,19 +386,26 @@ impl<'a> Builder<'a> {
         let text = std::fs::read_to_string(&on_disk)
             .map_err(|e| Error::new(format!("{}: {e}", on_disk.display())))?;
         let lines = text.lines().count();
+        let generated = text
+            .lines()
+            .take(GENERATED_MARK_WITHIN)
+            .any(|line| line.contains("@generated"));
         let source = Source::new(text);
         let package_root = self.target_roots.get(&*document.path) == Some(&module);
         check_files_module(first, source.whole(), package_root).map_err(not_understood)?;
         let file = FileId::new(self.files.len());
+        let declarations = source.declarations(&[]);
         self.files.push(File {
             path: document.path.to_string(),
             module,
             test: false,
             target: None,
             lines,
+            for_tests: declarations.for_tests,
+            generated,
         });
         let at = self.units.len();
-        let declarations = source.module_declarations();
+        let declarations = declarations.modules;
         let mut inline_modules = Vec::new();
         let mut holders = Vec::new();
         let mut named_modules = Vec::new();

@@ -26,12 +26,14 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let mut diagnostics: Vec<Diagnostic> = model
         .files
         .iter()
+        .filter(|file| !(file.generated && model.settings.long_file.skip_generated))
         .filter_map(|file| {
             let most = match kernel.most_file_lines {
                 Some(most) if kernel.holds(&file.path) => most,
                 _ => MOST_LINES,
             };
-            (file.lines > most && concerned(file)).then(|| long_file(file, most))
+            let lines = measured_lines(model, file);
+            (lines > most && concerned(file)).then(|| long_file(file, lines, most))
         })
         .collect();
     // By directory, its members, and whether a file below it is in scope.
@@ -68,13 +70,36 @@ fn holders(path: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
-fn long_file(file: &File, most: usize) -> Diagnostic {
+/// The lines of `file` that count: all of them, or with
+/// `skip-test-modules` all but its inline test modules'.
+fn measured_lines(model: &Model, file: &File) -> usize {
+    if !model.settings.long_file.skip_test_modules {
+        return file.lines;
+    }
+    let mut skipped = 0;
+    // The end of the last module counted; one inside it is counted with it.
+    let mut counted_to = 0;
+    for &(first, last) in file
+        .for_tests
+        .iter()
+        .filter(|item| item.inline_module)
+        .map(|item| &item.lines)
+    {
+        if first > counted_to {
+            skipped += (last - first + 1) as usize;
+            counted_to = last;
+        }
+    }
+    file.lines.saturating_sub(skipped)
+}
+
+fn long_file(file: &File, lines: usize, most: usize) -> Diagnostic {
     Diagnostic {
         lint: Lint::Size(super::SizeLint::LongFile),
         key: file.path.clone(),
         message: format!(
-            "`{}` is long: it has {} lines, more than {most}",
-            file.path, file.lines
+            "`{}` is long: it has {lines} lines, more than {most}",
+            file.path
         ),
         location: Some(Location {
             file: file.path.clone(),
@@ -83,7 +108,7 @@ fn long_file(file: &File, most: usize) -> Diagnostic {
         notes: Vec::new(),
         picture: Picture::Bar {
             label: "lines".to_owned(),
-            length: file.lines,
+            length: lines,
             most,
         },
     }

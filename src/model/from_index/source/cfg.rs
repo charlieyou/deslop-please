@@ -3,6 +3,7 @@
 
 use super::Source;
 use super::tokens::{Kind, Token};
+use crate::model::ForTests;
 use crate::scip::Range;
 
 /// A `mod name;` or `mod name { .. }` as its text writes it.
@@ -15,11 +16,24 @@ pub struct ModuleDeclaration {
     pub for_tests: bool,
 }
 
-impl Source {
+/// The items a file's `cfg` attributes build only for tests, and its `mod`
+/// declarations.
+#[derive(Debug, Default)]
+pub struct Declarations {
     /// Every `mod` declaration, in order.
-    pub fn module_declarations(&self) -> Vec<ModuleDeclaration> {
+    pub modules: Vec<ModuleDeclaration>,
+    /// Each item built only for tests, from its first attribute to its end,
+    /// in order of where it starts; one may hold others.
+    pub for_tests: Vec<ForTests>,
+}
+
+impl Source {
+    /// Every `mod` declaration, and every item built only for tests, where a
+    /// `cfg` predicate `feature = "<one of test_features>"` holds only for
+    /// tests too.
+    pub fn declarations(&self, test_features: &[String]) -> Declarations {
         let tokens = &self.tokens;
-        let mut declarations = Vec::new();
+        let mut declarations = Declarations::default();
         // Whether an attribute read since the last item asks for tests.
         let mut for_tests = false;
         let mut at = 0;
@@ -28,7 +42,12 @@ impl Source {
             let next = tokens.get(at + 1).copied();
             if self.is(token, "#") && next.is_some_and(|t| self.is(t, "[")) {
                 let close = self.matching(at + 1).unwrap_or(tokens.len());
-                for_tests |= self.is_cfg_for_tests(&tokens[at + 2..close]);
+                if self.is_cfg_for_tests(&tokens[at + 2..close], test_features) {
+                    for_tests = true;
+                    declarations
+                        .for_tests
+                        .extend(self.item_for_tests(at, close + 1));
+                }
                 at = close + 1;
                 continue;
             }
@@ -47,7 +66,7 @@ impl Source {
                     .get(at + 2)
                     .is_some_and(|t| self.is(*t, ";") || self.is(*t, "{"))
             {
-                declarations.push(ModuleDeclaration {
+                declarations.modules.push(ModuleDeclaration {
                     name: self.range(name.start, name.end),
                     for_tests,
                 });
@@ -58,32 +77,89 @@ impl Source {
         declarations
     }
 
+    /// The item whose attributes start at token `first` and whose tokens
+    /// follow from `from` on, with any more attributes first.
+    fn item_for_tests(&self, first: usize, mut from: usize) -> Option<ForTests> {
+        let tokens = &self.tokens;
+        while self.is(*tokens.get(from)?, "#") && self.is(*tokens.get(from + 1)?, "[") {
+            from = self.matching(from + 1)? + 1;
+        }
+        let start = from;
+        // After an `=`, a `{` opens an expression, and a `;` ends the item.
+        let mut assigned = false;
+        // How deep in generics' `<..>` the header is.
+        let mut angles = 0i32;
+        let mut at = from;
+        let last = loop {
+            let token = *tokens.get(at)?;
+            match (token.kind, self.text(token)) {
+                (Kind::Open, "{") if !assigned => break self.matching(at)?,
+                (Kind::Open, _) => at = self.matching(at)?,
+                // The end of what holds it: a field's, an argument's.
+                (Kind::Close, _) => break at.checked_sub(1)?,
+                (_, ";") => break at,
+                (_, ",") if angles <= 0 => break at.checked_sub(1)?,
+                (_, "=") if angles <= 0 => assigned = true,
+                (_, "<") if !assigned => angles += 1,
+                (_, ">") if !assigned => angles -= 1,
+                _ => {}
+            }
+            at += 1;
+        };
+        if last < start {
+            return None;
+        }
+        let line = |token: Token| self.position(token.start).line + 1;
+        let words: Vec<&str> = tokens[start..last]
+            .iter()
+            .map(|t| self.text(*t))
+            .filter(|word| !matches!(*word, "pub" | "(" | ")" | "crate" | "super" | "in"))
+            .take(1)
+            .collect();
+        Some(ForTests {
+            lines: (line(tokens[first]), line(tokens[last])),
+            inline_module: words == ["mod"] && self.is(tokens[last], "}"),
+        })
+    }
+
     /// Whether the attribute `tokens` write, inside `#[..]`, is a `cfg` that
     /// holds only when `test` does.
-    fn is_cfg_for_tests(&self, tokens: &[Token]) -> bool {
+    fn is_cfg_for_tests(&self, tokens: &[Token], test_features: &[String]) -> bool {
         match tokens {
             [cfg, open, predicate @ .., close] => {
                 self.is(*cfg, "cfg")
                     && self.is(*open, "(")
                     && self.is(*close, ")")
-                    && self.implies_test(predicate)
+                    && self.implies_test(predicate, test_features)
             }
             _ => false,
         }
     }
 
     /// Whether the `cfg` predicate `tokens` write holds only when `test`
-    /// does: `test`, an `all` with such a predicate in it, an `any` of only
-    /// such predicates. A `not` is taken to hold without `test`.
-    fn implies_test(&self, tokens: &[Token]) -> bool {
+    /// does: `test`, a feature of `test_features`, an `all` with such a
+    /// predicate in it, an `any` of only such predicates. A `not` is taken
+    /// to hold without `test`.
+    fn implies_test(&self, tokens: &[Token], test_features: &[String]) -> bool {
         match tokens {
             [name] => self.is(*name, "test"),
+            [name, equals, value] if self.is(*name, "feature") && self.is(*equals, "=") => {
+                let value = self.text(*value);
+                test_features.iter().any(|feature| {
+                    value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) == Some(feature)
+                })
+            }
             [operator, open, inner @ .., close] if self.is(*open, "(") && self.is(*close, ")") => {
                 let predicates = self.predicates(inner);
                 match self.text(*operator) {
-                    "all" => predicates.iter().any(|p| self.implies_test(p)),
+                    "all" => predicates
+                        .iter()
+                        .any(|p| self.implies_test(p, test_features)),
                     "any" => {
-                        !predicates.is_empty() && predicates.iter().all(|p| self.implies_test(p))
+                        !predicates.is_empty()
+                            && predicates
+                                .iter()
+                                .all(|p| self.implies_test(p, test_features))
                     }
                     _ => false,
                 }
@@ -117,7 +193,8 @@ mod tests {
     fn declared(text: &str) -> Vec<(String, bool)> {
         let source = Source::new(text.into());
         source
-            .module_declarations()
+            .declarations(&[])
+            .modules
             .into_iter()
             .map(|declaration| {
                 let start = source.offset(declaration.name.start).unwrap();

@@ -105,6 +105,10 @@ plain-data = true
 # Code in a type's module is inside it for its private fields, as rustc
 # lets it be; a private field it alone uses keeps the struct guarding.
 home-module = true
+
+[long-file]
+skip-test-modules = true # an inline `#[cfg(test)] mod tests { .. }` counts no lines
+skip-generated = true    # a file marked `@generated` in its first 5 lines is not measured
 ```
 
 ### Add to your `AGENTS.md`
