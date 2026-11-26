@@ -78,10 +78,9 @@ impl Workspace {
             .output()
             .map_err(|e| Error::new(format!("cannot run cargo: {e}")))?;
         if !output.status.success() {
-            let message = String::from_utf8_lossy(&output.stderr);
             return Err(Error::new(format!(
                 "not inside a Cargo workspace: cargo metadata says: {}",
-                message.trim()
+                cargo_error(&output.stderr)
             )));
         }
         let metadata: Value = serde_json::from_slice(&output.stdout)
@@ -382,6 +381,22 @@ fn list<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, Error> {
 
 fn missing(key: &str) -> Error {
     Error::new(format!("cargo metadata's output has no {key:?}"))
+}
+
+/// What cargo wrote to `stderr` when it failed, without the lines that say
+/// it waited for a lock another cargo held.
+pub fn cargo_error(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .starts_with("Blocking waiting for file lock")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]

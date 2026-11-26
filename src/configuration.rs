@@ -107,7 +107,7 @@ impl Configuration {
         }
         Err(Error::new(format!(
             "cannot index with `{self}`: cargo metadata says: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            crate::workspace::cargo_error(&output.stderr)
         )))
     }
 
