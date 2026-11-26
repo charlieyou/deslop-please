@@ -92,11 +92,23 @@ impl Workspace {
     fn from_metadata(metadata: &Value) -> Result<Workspace, Error> {
         let root = PathBuf::from(text(metadata, "workspace_root")?);
         let target_directory = PathBuf::from(text(metadata, "target_directory")?);
-        let packages = list(metadata, "packages")?
+        let packages: Vec<Package> = list(metadata, "packages")?
             .iter()
             .map(|package| Package::from_metadata(package, &root))
             .collect::<Result<_, _>>()?;
         let settings = Settings::read(&root)?;
+        let unlayered: Vec<&str> = packages
+            .iter()
+            .map(|package| package.name.as_str())
+            .filter(|name| settings.layer(name).is_none())
+            .collect();
+        if settings.every_member_layered && !unlayered.is_empty() {
+            return Err(Error::new(format!(
+                "{}: `layers` leaves out {}, and `every-member-layered` wants each member in a layer",
+                crate::settings::FILE,
+                unlayered.join(", ")
+            )));
+        }
         Ok(Workspace {
             root,
             target_directory,

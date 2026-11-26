@@ -93,6 +93,9 @@ layers = [
   ["core"],
   ["cli"],
 ]
+# A member in no layer is an error, not a crate whose dependencies go
+# unchecked.
+every-member-layered = true
 
 # Crates outside the workspace that use it, by their directories relative to
 # the workspace's root: an excluded member, or a crate of another repository.

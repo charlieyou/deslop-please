@@ -1,7 +1,7 @@
 //! What `deslop-please.toml`'s policies let through, and that without them
 //! every lint keeps its default.
 
-use super::{keys, private_pair, run, scratch_workspace};
+use super::{keys, layered_workspace, private_pair, run, scratch_workspace};
 
 #[test]
 fn kernel_paths_are_held_to_finite_limits_of_their_own_and_only_when_configured() {
@@ -746,4 +746,29 @@ pub mod u {
             "shared-mutable-bag bags::data::Through",
         ]
     );
+}
+
+#[test]
+fn a_member_in_no_layer_is_an_error_when_every_member_must_be_layered() {
+    // `low` uses `high`, and `high` is in no layer: unchecked by default.
+    let workspace = layered_workspace("every_member_layered", "layers = [['low']]\n");
+    assert_eq!(run(&workspace, &[]).code, Some(0));
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "layers = [['low']]\nevery-member-layered = true\n",
+    )
+    .unwrap();
+    let unlayered = run(&workspace, &[]);
+    assert_eq!(unlayered.code, Some(2));
+    assert!(
+        unlayered.stderr.contains("`layers` leaves out high,"),
+        "{}",
+        unlayered.stderr
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "layers = [['low'], ['high']]\nevery-member-layered = true\n",
+    )
+    .unwrap();
+    assert_eq!(keys(&workspace), ["layer-violation low -> high"]);
 }
