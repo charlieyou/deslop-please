@@ -1596,8 +1596,16 @@ pub mod named { use crate::limits::MAX; const MIN: u32 = 1; pub fn f() -> String
 pub struct Row { pub cells: Vec<u32>, pub shift: u8 }
 pub struct Other { pub cells: Vec<u32> }
 impl Row { pub fn wipe(&mut self) { self.shift = 0; } }
-macro_rules! row { () => { impl Row { pub fn new() -> Self { let wipe = 0; Self { cells: Vec::new(), shift: wipe } } } }; }
+macro_rules! row { () => { impl Row { pub fn new() -> Self { let wipe = 0; Self { cells: Vec::new(), shift: wipe } }
+    pub fn copy(wipe: Self) -> Self { wipe } } }; }
 row!();
+pub struct Rep { pub cells: u32 }
+macro_rules! rep { ($($t:ty),*) => { $( impl From<$t> for Rep { fn from(v: $t) -> Self { Self { cells: v as u32 } } } )* }; }
+rep!(u8, u16);
+#[derive(Default)]
+pub struct Pat { pub cells: Vec<u32> }
+macro_rules! pat { () => { impl Pat { pub fn size(&self) -> usize { let Self { ref cells, .. } = *self; cells.len() } } }; }
+pat!();
 ";
     let main = "\
 use core_t::LIMIT;
@@ -1608,6 +1616,7 @@ fn main() {
     let rows = core_t::Rows::new();
     let _ = format!(\"{LIMIT} {} {:>width$} {width:>3}\", view.depth.0, rows.len(), width = 2);
     let _ = (core_t::shown::show(), core_t::glob::top(), core_t::named::f(), core_t::Row::new());
+    let _ = (core_t::Rep::from(1u8), core_t::Pat::default());
 }
 ";
     let serde = "\
@@ -1642,10 +1651,13 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
     // value can be captured, and `{WIDE}` only its own module's constant.
     // A glob brings in what its module re-exports; `use limits::MAX` no `MIN`.
     // `row!`'s body uses the fields of `Row`, which it implements, not `Other`'s,
-    // and a local named `wipe` is no use of `Row::wipe`.
+    // and a local named `wipe` is no use of `Row::wipe`. `rep!` uses `cells` in
+    // each `$( impl .. )*`, and `pat!` in a `ref` pattern.
     assert_eq!(
         keys(&workspace),
         [
+            "over-public core_t::Pat::cells",
+            "over-public core_t::Rep::cells",
             "over-public core_t::Row::cells",
             "over-public core_t::Row::shift",
             "over-public core_t::limits",

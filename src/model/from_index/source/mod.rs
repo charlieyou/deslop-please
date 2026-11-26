@@ -259,12 +259,15 @@ impl Source {
                         types: Vec::new(),
                     };
                     for (index, word) in body.iter().enumerate() {
-                        // An `impl` that starts an item, not `x: impl Trait`.
-                        let item = index == 0
-                            || !matches!(
-                                self.text(body[index - 1]),
-                                ":" | "->" | "(" | "," | "&" | "<"
-                            );
+                        // An `impl` that starts an item, not `x: impl Trait`,
+                        // `&mut impl Trait` or `(impl A, B)`; `$(` and `=> (`
+                        // open a repetition and a body.
+                        let text = |at: usize| at.checked_sub(1).map(|at| self.text(body[at]));
+                        let item = match text(index) {
+                            Some(":" | "->" | "," | "&" | "<" | "mut") => false,
+                            Some("(") => matches!(text(index - 1), Some("$" | "=>")),
+                            _ => true,
+                        };
                         if !self.is(*word, "impl") || !item {
                             continue;
                         }
@@ -333,7 +336,8 @@ impl Source {
     /// are none of them.
     fn used_names(&self, body: &[Token]) -> HashSet<String> {
         let mut names = HashSet::new();
-        // By open bracket, whether it opens a struct literal: `Self {`, `Row {`.
+        // By open bracket, whether it opens a struct literal: `Self {`, `Row {`,
+        // but not the body after `-> Self`.
         let mut literal: Vec<bool> = Vec::new();
         for (at, token) in body.iter().enumerate() {
             let text = |at: usize| body.get(at).map(|t| self.text(*t));
@@ -342,7 +346,8 @@ impl Source {
                     let opener = at.checked_sub(1).and_then(text).unwrap_or_default();
                     let typed =
                         opener == "Self" || opener.starts_with(|c: char| c.is_ascii_uppercase());
-                    literal.push(self.is(*token, "{") && typed);
+                    let returned = at.checked_sub(2).and_then(text) == Some("->");
+                    literal.push(self.is(*token, "{") && typed && !returned);
                 }
                 Kind::Close => {
                     literal.pop();
@@ -350,8 +355,13 @@ impl Source {
                 Kind::Ident => {
                     let before = at.checked_sub(1).and_then(text);
                     let member = matches!(before, Some("." | "::"));
+                    // A field's name, after any `ref` or `mut` of a pattern.
+                    let mut start = at;
+                    while start > 0 && matches!(text(start - 1), Some("ref" | "mut")) {
+                        start -= 1;
+                    }
                     let field = literal.last() == Some(&true)
-                        && matches!(before, Some("{" | ","))
+                        && matches!(start.checked_sub(1).and_then(text), Some("{" | ","))
                         && matches!(text(at + 1), Some(":" | "," | "}"));
                     if member || field {
                         names.insert(self.text(*token).to_owned());
