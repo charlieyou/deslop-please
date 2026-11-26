@@ -18,7 +18,7 @@ use crate::model::{
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
 use blocks::Blocks;
-use source::{Access, ImplBlock, Plain, PubUse, Source};
+use source::{Access, ImplBlock, Plain, PubUse, Source, TextPath};
 
 /// The model of `workspace` from its `index`, with `consumed`, what its
 /// consumers use of it: each symbol, and whether test code uses it.
@@ -110,6 +110,8 @@ struct Unit<'a> {
     idents: HashSet<String>,
     /// What its plain `pub use` declarations name.
     reexports: Vec<Reexport>,
+    /// Paths it writes as text, where.
+    mentions: Vec<TextPath>,
 }
 
 impl<'a> Builder<'a> {
@@ -149,17 +151,17 @@ impl<'a> Builder<'a> {
         let wrappers = self.wrappers();
         self.mark_lent_reads(&wrappers);
         let crate_deps = self.collect_crate_deps();
-        let mentions = consumed
-            .iter()
-            .filter_map(|(symbol, test)| match self.symbols.get(symbol.as_str()) {
+        let mut mentions = self.text_mentions();
+        mentions.extend(consumed.iter().filter_map(|(symbol, test)| {
+            match self.symbols.get(symbol.as_str()) {
                 Some(&Named::Item(item)) => Some(Mention {
                     item,
                     test: *test,
                     from: None,
                 }),
                 _ => None,
-            })
-            .collect();
+            }
+        }));
         Model {
             tree: self.tree,
             files: self.files,
@@ -180,6 +182,125 @@ impl<'a> Builder<'a> {
             traits,
             trait_impls,
         }
+    }
+
+    /// The functions and constants that the workspace's code names as text,
+    /// by a path that ends with theirs: `EvDepth::is_off` names a method
+    /// `is_off` of a type `EvDepth`, `LIMIT` a constant `LIMIT`. A path names
+    /// what its own package has of that name, else what any package has; a
+    /// format string's capture names only a constant of its module's or an
+    /// enclosing one's.
+    fn text_mentions(&self) -> Vec<Mention> {
+        let mut by_name: HashMap<&str, Vec<ItemId>> = HashMap::new();
+        for (index, item) in self.items.iter().enumerate() {
+            if matches!(item.kind, ItemKind::Function | ItemKind::Constant) {
+                let last = item.name.rsplit("::").next().unwrap_or(&item.name);
+                by_name.entry(last).or_default().push(ItemId::new(index));
+            }
+        }
+        let mut mentions = Vec::new();
+        let imported: Vec<Vec<(NodeId, ItemId, bool)>> =
+            self.units.iter().map(|unit| self.imported(unit)).collect();
+        // What each module's `use` declarations name, or a glob's may: what
+        // a glob of the module brings in.
+        let used: HashSet<(NodeId, ItemId)> = imported
+            .iter()
+            .flatten()
+            .map(|&(module, item, _)| (module, item))
+            .collect();
+        let brings = |module: NodeId, item: ItemId| {
+            used.contains(&(module, item))
+                || self.glob_reexports.iter().any(|glob| glob.from == module)
+        };
+        for (index, unit) in self.units.iter().enumerate() {
+            let file = &self.files[unit.file.index()];
+            let package = self.tree.package_of(file.module);
+            let imported = &imported[index];
+            for text in &unit.mentions {
+                let segments: Vec<&str> = text
+                    .path
+                    .split("::")
+                    .skip_while(|s| matches!(*s, "crate" | "self" | "super"))
+                    .collect();
+                let Some(last) = segments.last() else {
+                    continue;
+                };
+                let from = unit
+                    .inline_modules
+                    .innermost(text.range)
+                    .unwrap_or(file.module);
+                // A format string's `{LIMIT}` names a constant in scope: an
+                // enclosing module's, or one that a `use` there names, by
+                // name or by a glob of a module that holds or re-exports it.
+                let in_scope = |id: ItemId| {
+                    let item = &self.items[id.index()];
+                    let named = |&(module, used, glob): &(NodeId, ItemId, bool)| {
+                        let globbed = self.items[used.index()]
+                            .module
+                            .is_some_and(|holder| holder == item.owner || brings(holder, id));
+                        self.tree.is_within(from, module) && (used == id || glob && globbed)
+                    };
+                    item.kind == ItemKind::Constant
+                        && item.parent.is_none()
+                        && (self.tree.is_within(from, item.owner) || imported.iter().any(named))
+                };
+                let named: Vec<ItemId> = by_name
+                    .get(last)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&item| self.ends_with(item, &segments))
+                    .filter(|&item| !text.captured || in_scope(item))
+                    .collect();
+                let own: Vec<ItemId> = named
+                    .iter()
+                    .copied()
+                    .filter(|&item| self.tree.package_of(self.items[item.index()].owner) == package)
+                    .collect();
+                let test = file.test || self.tree.is_test(from);
+                for item in if own.is_empty() { named } else { own } {
+                    mentions.push(Mention {
+                        item,
+                        test,
+                        from: Some((unit.file, from)),
+                    });
+                }
+            }
+        }
+        mentions
+    }
+
+    /// What the `use` declarations of `unit` name, by the module each is in,
+    /// and whether a glob, `name::*`, names it.
+    fn imported(&self, unit: &Unit) -> Vec<(NodeId, ItemId, bool)> {
+        let module = self.files[unit.file.index()].module;
+        let scan = unit.source.scan_file();
+        let imports = scan.imports;
+        let mut imported = Vec::new();
+        for occurrence in unit.document.occurrences.iter().filter(|o| !o.definition) {
+            let before = imports.partition_point(|import| import.start <= occurrence.range.start);
+            if before > 0
+                && imports[before - 1].holds(occurrence.range)
+                && let Some(Named::Item(item)) = self.symbols.get(occurrence.symbol)
+            {
+                let from = unit
+                    .inline_modules
+                    .innermost(occurrence.range)
+                    .unwrap_or(module);
+                let glob = scan.globs.iter().any(|g| g.start == occurrence.range.start);
+                imported.push((from, *item, glob));
+            }
+        }
+        imported
+    }
+
+    /// Whether the path of `item`, its crate's, modules' and own names,
+    /// ends with `segments`.
+    fn ends_with(&self, item: ItemId, segments: &[&str]) -> bool {
+        let item = &self.items[item.index()];
+        let path = format!("{}::{}", self.tree.display(item.owner), item.name);
+        let path: Vec<&str> = path.split("::").collect();
+        path.ends_with(segments)
     }
 
     /// What the code uses of what is outside the workspace: each symbol, and
@@ -318,6 +439,7 @@ impl<'a> Builder<'a> {
             scip_packages: HashSet::new(),
             idents: HashSet::new(),
             reexports: Vec::new(),
+            mentions: Vec::new(),
         };
         let scan = unit.source.scan_file();
         let mut scip_packages = HashSet::new();
@@ -332,6 +454,7 @@ impl<'a> Builder<'a> {
         unit.reexports = self.add_reexports(&unit, module, &scan.pub_uses);
         unit.scip_packages = scip_packages;
         unit.idents = scan.idents;
+        unit.mentions = scan.mentions;
         self.units.push(unit);
         Ok(())
     }

@@ -1564,3 +1564,77 @@ pub struct Outer(pub Inner); impl Outer { pub fn step(&self, n: u32) -> u32 { se
         ]
     );
 }
+
+#[test]
+fn a_use_written_as_text_in_a_serde_attribute_or_a_format_string_is_a_use() {
+    let lib = "\
+pub struct Depth(pub u32);
+impl Depth { pub fn is_off(&self) -> bool { self.0 == 0 } }
+pub const LIMIT: u32 = 3;
+pub struct Rows(Vec<u32>);
+impl Rows { pub fn new() -> Self { Rows(Vec::new()) } pub fn len(&self) -> usize { self.0.len() } }
+impl Rows { pub fn is_empty(&self) -> bool { self.0.is_empty() } }
+pub fn width() -> usize { 8 }
+pub mod shown { pub const WIDE: u32 = 1; pub fn show() -> String { format!(\"{WIDE}\") } }
+pub mod hidden { pub const WIDE: u32 = 2; }
+pub mod limits { pub const MAX: u32 = 9; pub const MIN: u32 = 0; pub const TOP: u32 = 5; }
+pub mod prelude { pub use crate::limits::TOP; }
+pub mod glob { use crate::prelude::{self, *}; pub fn top() -> String { format!(\"{TOP}\") } }
+pub mod named { use crate::limits::MAX; const MIN: u32 = 1; pub fn f() -> String { format!(\"{MAX}{MIN}\") } }
+";
+    let main = "\
+use core_t::LIMIT;
+#[derive(serde::Serialize)]
+struct View { #[serde(skip_serializing_if = \"core_t::Depth::is_off\")] depth: core_t::Depth }
+fn main() {
+    let view = View { depth: core_t::Depth(1) };
+    let rows = core_t::Rows::new();
+    let _ = format!(\"{LIMIT} {} {:>width$} {width:>3}\", view.depth.0, rows.len(), width = 2);
+    let _ = (core_t::shown::show(), core_t::glob::top(), core_t::named::f());
+}
+";
+    let serde = "\
+extern crate proc_macro;
+use proc_macro::TokenStream;
+#[proc_macro_derive(Serialize, attributes(serde))]
+pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
+";
+    let workspace = private_pair(
+        "text_uses",
+        lib,
+        main,
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"app\", \"core\", \"serde\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+                 [dependencies]\ncore_t = { path = \"../core\" }\nserde = { path = \"../serde\" }\n",
+            ),
+            (
+                "serde/Cargo.toml",
+                "[package]\nname = \"serde\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [lib]\nproc-macro = true\n",
+            ),
+            ("serde/src/lib.rs", serde),
+        ],
+    );
+    // `{width:>3}` captures the argument `width`, no function: only a
+    // value can be captured, and `{WIDE}` only its own module's constant.
+    // A glob brings in what its module re-exports; `use limits::MAX` no `MIN`.
+    assert_eq!(
+        keys(&workspace),
+        [
+            "over-public core_t::limits",
+            "over-public core_t::limits::MAX",
+            "over-public core_t::limits::TOP",
+            "over-public core_t::shown::WIDE",
+            "unused-pub core_t::hidden",
+            "unused-pub core_t::hidden::WIDE",
+            "unused-pub core_t::limits::MIN",
+            "unused-pub core_t::width",
+        ]
+    );
+}

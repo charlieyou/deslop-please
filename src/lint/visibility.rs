@@ -287,29 +287,90 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
     }
 
     record_struct_updates(model, graph, &mut item_usage);
-    for mention in model.mentions.iter().filter(|m| m.from.is_none()) {
+    for mention in &model.mentions {
+        let item = &model.items[mention.item.index()];
+        let package = tree.package_of(item.owner);
+        // A consumer's is from another crate; text in the workspace is
+        // where it is.
+        let (external, outside_home, from) = match mention.from {
+            None => (true, true, tree.root()),
+            Some((file, from)) => {
+                let file = &model.files[file.index()];
+                let target = item.file.and_then(|f| model.files[f.index()].target);
+                let same_target = tree.package_of(file.module) == package && file.target == target;
+                let home = declared_home(model, graph, mention.item);
+                (
+                    tree.package_of(file.module) != package
+                        || file.target != Some(TargetKind::Library),
+                    !same_target || is_outside_home(tree, from, home, package),
+                    from,
+                )
+            }
+        };
         let site = || AccessSite {
             test: mention.test,
-            external: true,
-            outside_home: true,
-            from: tree.root(),
+            external,
+            outside_home,
+            from,
         };
         record(&mut item_usage[mention.item.index()], site());
         if let Some(thing) = graph.thing_of[mention.item.index()] {
             record(&mut thing_usage[thing.index()], site());
         }
-        let item = &model.items[mention.item.index()];
         let start = item.module.unwrap_or(home_of(model, graph, mention.item));
-        let package = tree.package_of(start);
         for module in tree.ancestors(start).take_while(|&m| Some(m) != package) {
             record(mod_usage.entry(module).or_default(), site());
         }
     }
+    lend_len_to_is_empty(model, &mut item_usage);
     UsageTables {
         item_usage,
         thing_usage,
         mod_usage,
         non_empty_mods,
+    }
+}
+
+/// Counts the uses of a type's `len` as the uses of its `is_empty` too:
+/// clippy's `len_without_is_empty` wants one beside the other.
+fn lend_len_to_is_empty(model: &Model, item_usage: &mut [Usage]) {
+    let mut lens: HashMap<ItemId, ItemId> = HashMap::new();
+    let mut is_empties = Vec::new();
+    for (index, item) in model.items.iter().enumerate() {
+        let (Some(parent), ItemKind::Function) = (item.parent, item.kind) else {
+            continue;
+        };
+        match item.name.rsplit("::").next() {
+            Some("len") => {
+                lens.insert(parent, ItemId::new(index));
+            }
+            Some("is_empty") => is_empties.push((parent, ItemId::new(index))),
+            _ => {}
+        }
+    }
+    for (parent, is_empty) in is_empties {
+        if let Some(&len) = lens.get(&parent) {
+            let len = &item_usage[len.index()];
+            let lent = Usage {
+                prod_used: len.prod_used,
+                test_used: len.test_used,
+                prod_external_to_lib: len.prod_external_to_lib,
+                test_external_to_lib: len.test_external_to_lib,
+                prod_outside_home: len.prod_outside_home,
+                test_outside_home: len.test_outside_home,
+                internal_modules: len.internal_modules.clone(),
+            };
+            let usage = &mut item_usage[is_empty.index()];
+            usage.prod_used |= lent.prod_used;
+            usage.test_used |= lent.test_used;
+            usage.prod_external_to_lib |= lent.prod_external_to_lib;
+            usage.test_external_to_lib |= lent.test_external_to_lib;
+            usage.prod_outside_home |= lent.prod_outside_home;
+            usage.test_outside_home |= lent.test_outside_home;
+            for (module, count) in lent.internal_modules {
+                *usage.internal_modules.entry(module).or_default() += count;
+            }
+        }
     }
 }
 

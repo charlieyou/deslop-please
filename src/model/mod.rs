@@ -110,7 +110,7 @@ pub enum Visibility {
 }
 
 /// A use of an item that no reference shows: by a consumer outside the
-/// workspace.
+/// workspace, or by a path written as text, in a string or attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Mention {
     pub item: ItemId,

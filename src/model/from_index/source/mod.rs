@@ -5,11 +5,13 @@
 //! body computes anything.
 
 mod cfg;
+mod mentions;
 mod metrics;
 mod operators;
 mod tokens;
 mod uses;
 
+pub use mentions::TextPath;
 pub use metrics::PubUse;
 pub use uses::{Access, Plain};
 
@@ -55,8 +57,13 @@ pub struct Source {
 /// `pub use` / `pub(...) use` re-exports, and distinct identifier tokens.
 pub struct FileScan {
     pub imports: Vec<Range>,
+    /// In `use` declarations, each name before `::*`: a module whose items
+    /// they all import.
+    pub globs: Vec<Range>,
     pub pub_uses: Vec<PubUse>,
     pub idents: HashSet<String>,
+    /// Paths written as text, where: in serde attributes and format strings.
+    pub mentions: Vec<TextPath>,
 }
 
 /// Parsed pieces of an `impl` block header before its `{`.
@@ -151,23 +158,52 @@ impl Source {
     pub fn scan_file(&self) -> FileScan {
         let tokens = &self.tokens;
         let mut imports = Vec::new();
+        let mut globs = Vec::new();
         for (at, token) in tokens.iter().enumerate() {
             let precise_capture = tokens.get(at + 1).is_some_and(|next| self.is(*next, "<"));
             if !self.is(*token, "use") || precise_capture {
                 continue;
             }
-            let end = tokens[at..]
+            let last = tokens[at..]
                 .iter()
-                .find(|t| self.is(**t, ";"))
-                .map_or(self.text.len(), |t| t.end);
+                .position(|t| self.is(*t, ";"))
+                .map_or(tokens.len(), |end| at + end);
+            // Each `*`, after `name::` or in a group, `name::{self, *}`.
+            for star in at + 3..last {
+                if !self.is(tokens[star], "*") {
+                    continue;
+                }
+                // The `::` before the `*`, or before the group's `{`.
+                let mut depth = 0usize;
+                let colons = (at + 1..star).rev().find_map(|before| {
+                    match self.text(tokens[before]) {
+                        "::" if depth == 0 && before + 1 == star => return Some(before),
+                        "}" => depth += 1,
+                        "{" if depth == 0 => return Some(before - 1),
+                        "{" => depth -= 1,
+                        _ => {}
+                    }
+                    None
+                });
+                if let Some(colons) = colons.filter(|&colons| colons > at + 1)
+                    && self.is(tokens[colons], "::")
+                    && tokens[colons - 1].kind == Kind::Ident
+                {
+                    let name = tokens[colons - 1];
+                    globs.push(self.range(name.start, name.end));
+                }
+            }
+            let end = tokens.get(last).map_or(self.text.len(), |t| t.end);
             imports.push(self.range(token.start, end));
         }
         let pub_uses = metrics::pub_uses(&self.text, tokens, |start, end| self.range(start, end));
         let idents = metrics::collect_idents(&self.text, tokens);
         FileScan {
             imports,
+            globs,
             pub_uses,
             idents,
+            mentions: self.mentions(),
         }
     }
 
