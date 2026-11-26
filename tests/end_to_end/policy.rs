@@ -682,6 +682,11 @@ fn a_passive_record_and_a_command_lines_schema_may_be_wide_when_configured() {
         .unwrap();
         assert_eq!(wide(keys(&workspace)), reported, "{most}");
     }
+    // Of the two, only the passive `Record` says that its cap reports it.
+    let report = run(&workspace, &[]).stdout;
+    let capped =
+        "= note: a passive record, but wider than 15, which `most-passive-fields` allows\n";
+    assert_eq!(report.matches(capped).count(), 1, "{report}");
 }
 
 #[test]

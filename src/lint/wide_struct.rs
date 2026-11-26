@@ -55,10 +55,10 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             continue;
         }
         let type_item = graph.things[thing.index()].item;
+        let passive = policy.passive_records && !working.contains(&type_item);
         if model.is_serde(type_item)
             || (policy.clap_derives && model.derives(type_item, &["Parser", "Args", "Subcommand"]))
-            || (policy.passive_records
-                && !working.contains(&type_item)
+            || (passive
                 && policy
                     .most_passive_fields
                     .is_none_or(|most| struct_fields.len() <= most))
@@ -79,6 +79,12 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             })
             .collect();
         names.sort();
+        let mut notes = vec![format!("fields: {}", listed(&names))];
+        if passive && let Some(most) = policy.most_passive_fields {
+            notes.push(format!(
+                "a passive record, but wider than {most}, which `most-passive-fields` allows"
+            ));
+        }
         diagnostics.push(Diagnostic {
             lint: Lint::Size(super::SizeLint::WideStruct),
             key,
@@ -87,7 +93,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
                 counted(struct_fields.len(), "field")
             ),
             location: item_location(model, type_item),
-            notes: vec![format!("fields: {}", listed(&names))],
+            notes,
             picture: Picture::Bar {
                 label: "fields".to_owned(),
                 length: struct_fields.len(),

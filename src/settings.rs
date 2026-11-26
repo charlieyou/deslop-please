@@ -92,7 +92,8 @@ pub struct WideStruct {
     /// that holds data for others, which a flat list of fields suits.
     pub passive_records: bool,
     /// The most fields such a record may have before it is reported anyway;
-    /// unset, any number.
+    /// unset, any number. At 15 or below, the limit for every struct, it
+    /// spares no record.
     pub most_passive_fields: Option<usize>,
     /// A struct deriving clap's `Parser`, `Args` or `Subcommand` is a
     /// command line's schema, flat as its flags are.

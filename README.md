@@ -168,7 +168,7 @@ owned-locals = true
 
 [wide-struct]
 passive-records = true # a struct with no method of its own that takes `self` may be wide
-most-passive-fields = 24 # but no wider than this; unset, any width
+most-passive-fields = 24 # but no wider than this; unset, any width; 15 or less, none
 clap-derives = true    # so may one deriving clap's `Parser`, `Args` or `Subcommand`
 
 [duplicate-code]
