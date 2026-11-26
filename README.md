@@ -86,6 +86,17 @@ crate-tests = "justify"    # tests elsewhere in the crate, for `pub(crate)`
 [string-error]
 boundary-only = true                 # report only functions visible outside their module
 application-crates = ["cli", "server"] # here report only `pub` functions
+
+[high-fan-out]
+# No `god-hub`: a module that `high-fan-out` reports notes how many modules
+# depend on it, and the modules below it are no part of its fan-out.
+fold-god-hub = true
+# The most modules one module may use, from a crate's layer of `layers` up;
+# below the lowest layer named, the default of 15 holds.
+most-by-layer = { core = 20, cli = 25 }
+# A use of another crate's module counts as one of its top module,
+# `crate::top_module`; default "module".
+other-crates = "top-module"
 ```
 
 ### Add to your `AGENTS.md`

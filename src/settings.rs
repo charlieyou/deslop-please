@@ -3,6 +3,7 @@
 //! empty one, which keeps every lint at its default. A key this tool does not
 //! know is an error, so that a misspelt policy is never silently ignored.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -27,6 +28,34 @@ pub struct Settings {
     pub test_only_pub: TestOnlyPub,
     /// Which functions may return `Result<_, String>`.
     pub string_error: StringError,
+    /// How `high-fan-out` counts, and how much it lets through.
+    pub high_fan_out: HighFanOut,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct HighFanOut {
+    /// No `god-hub`: a module that `high-fan-out` reports notes how many
+    /// modules depend on it instead, and what is below it is no part of
+    /// its fan-out, as it is none of its fan-in.
+    pub fold_god_hub: bool,
+    /// By a crate of `layers`, the most modules one module of its layer or a
+    /// layer above may use; the lowest crate's layer that is at or below a
+    /// module's sets its limit.
+    pub most_by_layer: BTreeMap<String, usize>,
+    /// How a module of another crate counts.
+    pub other_crates: Granularity,
+}
+
+/// What one use of another crate's module counts as.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Granularity {
+    /// Its module.
+    #[default]
+    Module,
+    /// The crate's top module that holds it: `crate::top_module`.
+    TopModule,
 }
 
 /// Where a `String` error is fine: away from a library's boundary. By
@@ -171,8 +200,39 @@ impl Settings {
         Settings::parse(&text).map_err(|e| Error::new(format!("{}: {e}", path.display())))
     }
 
-    fn parse(text: &str) -> Result<Settings, toml::de::Error> {
-        toml::from_str(text)
+    fn parse(text: &str) -> Result<Settings, Error> {
+        let settings: Settings = toml::from_str(text).map_err(|e| Error::new(e.to_string()))?;
+        if let Some(name) = settings
+            .high_fan_out
+            .most_by_layer
+            .keys()
+            .find(|name| settings.layer(name).is_none())
+        {
+            return Err(Error::new(format!(
+                "`high-fan-out.most-by-layer` names `{name}`, which is in no layer of `layers`"
+            )));
+        }
+        Ok(settings)
+    }
+
+    /// The layer of the crate named `name`, by package or crate name, if
+    /// `layers` holds it.
+    pub fn layer(&self, name: &str) -> Option<usize> {
+        let name = name.replace('-', "_");
+        self.layers.iter().position(|members| lists(members, &name))
+    }
+
+    /// The most modules a module of the crate named `name` may use, by
+    /// `[high-fan-out]`'s `most-by-layer`, if it sets it.
+    pub fn most_fan_out(&self, name: &str) -> Option<usize> {
+        let layer = self.layer(name)?;
+        self.high_fan_out
+            .most_by_layer
+            .iter()
+            .filter_map(|(from, &most)| Some((self.layer(from)?, most)))
+            .filter(|&(from, _)| from <= layer)
+            .max_by_key(|&(from, _)| from)
+            .map(|(_, most)| most)
     }
 }
 
@@ -229,6 +289,22 @@ layers = [
         ] {
             assert!(!kernel.holds(not), "{not}");
         }
+    }
+
+    #[test]
+    fn a_layers_fan_out_limit_holds_from_its_layer_up_and_names_a_layer() {
+        let settings = Settings::parse(
+            "layers = [[\"ids\"], [\"core\", \"model\"], [\"app\"], [\"cli\"]]\n\
+             [high-fan-out]\nmost-by-layer = { core = 20, app = 25 }\n",
+        )
+        .unwrap();
+        let limits: Vec<Option<usize>> = ["ids", "model", "app", "cli", "other"]
+            .into_iter()
+            .map(|name| settings.most_fan_out(name))
+            .collect();
+        assert_eq!(limits, [None, Some(20), Some(25), Some(25), None]);
+        let error = Settings::parse("[high-fan-out]\nmost-by-layer = { core = 20 }\n").unwrap_err();
+        assert!(error.to_string().contains("`core`"), "{error}");
     }
 
     #[test]

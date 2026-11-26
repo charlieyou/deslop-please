@@ -15,7 +15,8 @@ use super::{
     item_location, listed, module_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
-use crate::model::{ItemId, ItemKind, Model, NodeId};
+use crate::model::{ItemId, ItemKind, Model, NodeId, Tree};
+use crate::settings::Granularity;
 
 /// The most distinct sibling/foreign workspace modules one module may depend on.
 const MOST_FAN_OUT: usize = 15;
@@ -37,6 +38,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
 
 fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
+    let policy = &model.settings.high_fan_out;
     let mut deps: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
     let mut fan_in: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
     for reference in model.references.iter().filter(|r| !r.test) {
@@ -52,14 +54,21 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         let target_mod = graph.thing_of[reference.item.index()]
             .map_or(item.owner, |thing| graph.things[thing.index()].home);
         let from = reference.from;
+        let below = tree.is_within(target_mod, from);
         if from == target_mod
             || tree.parent(target_mod) == Some(from)
             || tree.is_within(from, target_mod)
+            || (below && policy.fold_god_hub)
         {
             continue;
         }
-        deps.entry(from).or_default().insert(target_mod);
-        if !tree.is_within(target_mod, from) {
+        deps.entry(from).or_default().insert(counted_as(
+            tree,
+            policy.other_crates,
+            from,
+            target_mod,
+        ));
+        if !below {
             fan_in.entry(target_mod).or_default().insert(from);
         }
     }
@@ -69,56 +78,109 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         if !in_scope(tree, scope, *module) {
             continue;
         }
-        let name = tree.display(*module);
-        if targets.len() > MOST_FAN_OUT {
-            let mut target_names: Vec<String> = targets.iter().map(|&t| tree.display(t)).collect();
-            target_names.sort();
-            diagnostics.push(Diagnostic {
-                lint: Lint::Graph(GraphLint::HighFanOut),
-                key: name.clone(),
-                message: format!(
-                    "`{name}` has high fan-out: it uses {}, more than {MOST_FAN_OUT}",
-                    counted(targets.len(), "module")
-                ),
-                location: module_location(model, *module),
-                notes: vec![format!("depends on: {}", listed(&target_names))],
-                picture: Picture::Bar {
-                    label: "uses".to_owned(),
-                    length: targets.len(),
-                    most: MOST_FAN_OUT,
-                },
-            });
-        }
-        if targets.len() >= MIN_HUB_DEGREE
-            && let Some(callers) = fan_in.get(module)
+        let callers = fan_in.get(module);
+        diagnostics.extend(fan_out(model, *module, targets, callers));
+        if !policy.fold_god_hub
+            && targets.len() >= MIN_HUB_DEGREE
+            && let Some(callers) = callers
             && callers.len() >= MIN_HUB_DEGREE
         {
-            let mut caller_names: Vec<String> = callers.iter().map(|&c| tree.display(c)).collect();
-            caller_names.sort();
-            let mut target_names: Vec<String> = targets.iter().map(|&t| tree.display(t)).collect();
-            target_names.sort();
-            diagnostics.push(Diagnostic {
-                lint: Lint::Graph(GraphLint::GodHub),
-                key: name.clone(),
-                message: format!(
-                    "`{name}` is a god hub: {} depend on it and it depends on {}",
-                    counted(callers.len(), "module"),
-                    counted(targets.len(), "module"),
-                ),
-                location: module_location(model, *module),
-                notes: vec![
-                    format!("used by: {}", listed(&caller_names)),
-                    format!("depends on: {}", listed(&target_names)),
-                ],
-                picture: Picture::Bar {
-                    label: "degree".to_owned(),
-                    length: callers.len() + targets.len(),
-                    most: MIN_HUB_DEGREE * 2 - 1,
-                },
-            });
+            diagnostics.push(god_hub(model, *module, targets, callers));
         }
     }
     diagnostics
+}
+
+/// What a use of `target` from `from` counts as: the module, or for one of
+/// another crate the top module that holds it, when `[high-fan-out]` says.
+fn counted_as(tree: &Tree, other_crates: Granularity, from: NodeId, target: NodeId) -> NodeId {
+    let package = tree.package_of(target);
+    if other_crates == Granularity::Module || package == tree.package_of(from) {
+        return target;
+    }
+    tree.ancestors(target)
+        .find(|&module| tree.parent(module) == package)
+        .unwrap_or(target)
+}
+
+fn names(tree: &Tree, modules: &BTreeSet<NodeId>) -> Vec<String> {
+    let mut names: Vec<String> = modules.iter().map(|&m| tree.display(m)).collect();
+    names.sort();
+    names
+}
+
+fn fan_out(
+    model: &Model,
+    module: NodeId,
+    targets: &BTreeSet<NodeId>,
+    callers: Option<&BTreeSet<NodeId>>,
+) -> Option<Diagnostic> {
+    let tree = &model.tree;
+    let layered = tree
+        .package_of(module)
+        .and_then(|package| model.settings.most_fan_out(&tree.node(package).name));
+    let most = layered.unwrap_or(MOST_FAN_OUT);
+    if targets.len() <= most {
+        return None;
+    }
+    let name = tree.display(module);
+    let mut notes = vec![format!("depends on: {}", listed(&names(tree, targets)))];
+    if layered.is_some() {
+        notes.push("held to its layer's limit, which deslop-please.toml sets".to_owned());
+    }
+    if model.settings.high_fan_out.fold_god_hub
+        && let Some(callers) = callers
+    {
+        notes.push(format!(
+            "{} depend on it: {}",
+            counted(callers.len(), "module"),
+            listed(&names(tree, callers))
+        ));
+    }
+    Some(Diagnostic {
+        lint: Lint::Graph(GraphLint::HighFanOut),
+        key: name.clone(),
+        message: format!(
+            "`{name}` has high fan-out: it uses {}, more than {most}",
+            counted(targets.len(), "module")
+        ),
+        location: module_location(model, module),
+        notes,
+        picture: Picture::Bar {
+            label: "uses".to_owned(),
+            length: targets.len(),
+            most,
+        },
+    })
+}
+
+fn god_hub(
+    model: &Model,
+    module: NodeId,
+    targets: &BTreeSet<NodeId>,
+    callers: &BTreeSet<NodeId>,
+) -> Diagnostic {
+    let tree = &model.tree;
+    let name = tree.display(module);
+    Diagnostic {
+        lint: Lint::Graph(GraphLint::GodHub),
+        key: name.clone(),
+        message: format!(
+            "`{name}` is a god hub: {} depend on it and it depends on {}",
+            counted(callers.len(), "module"),
+            counted(targets.len(), "module"),
+        ),
+        location: module_location(model, module),
+        notes: vec![
+            format!("used by: {}", listed(&names(tree, callers))),
+            format!("depends on: {}", listed(&names(tree, targets))),
+        ],
+        picture: Picture::Bar {
+            label: "degree".to_owned(),
+            length: callers.len() + targets.len(),
+            most: MIN_HUB_DEGREE * 2 - 1,
+        },
+    }
 }
 
 #[derive(Default)]

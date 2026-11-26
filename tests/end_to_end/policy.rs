@@ -1,7 +1,7 @@
 //! What `deslop-please.toml`'s policies let through, and that without them
 //! every lint keeps its default.
 
-use super::{keys, private_pair, scratch_workspace};
+use super::{keys, private_pair, run, scratch_workspace};
 
 #[test]
 fn kernel_paths_are_held_to_finite_limits_of_their_own_and_only_when_configured() {
@@ -219,5 +219,151 @@ fn a_string_error_is_reported_at_a_boundary_when_configured_and_everywhere_by_de
     assert_eq!(
         errors(keys(&workspace)),
         ["string-error core_t::checked", "string-error core_t::open"]
+    );
+}
+
+/// `pub mod {name} { pub fn f() -> u32 { 1 } }` for each name.
+fn leaves(names: impl IntoIterator<Item = String>) -> String {
+    names
+        .into_iter()
+        .map(|name| format!("pub mod {name} {{ pub fn f() -> u32 {{ 1 }} }}\n"))
+        .collect()
+}
+
+/// A module `name` whose `g` calls `f` of each of `paths`, holding `inner`.
+fn user(name: &str, paths: impl IntoIterator<Item = String>, inner: &str) -> String {
+    let calls: String = paths
+        .into_iter()
+        .map(|path| format!(" + {path}::f()"))
+        .collect();
+    format!("pub mod {name} {{\n    pub fn g() -> u32 {{ 0{calls} }}\n    {inner}\n}}\n")
+}
+
+fn numbered(prefix: &str, count: usize) -> impl Iterator<Item = String> {
+    (1..=count).map(move |at| format!("{prefix}{at}"))
+}
+
+#[test]
+fn a_god_hub_folds_into_high_fan_out_and_what_is_below_a_module_is_no_part_of_its_fan_out() {
+    let mut lib = format!("//! Hubs.\n{}", leaves(numbered("m", 16)));
+    let fifteen = || numbered("crate::m", 15);
+    // `hub` uses 15 modules and one below it; `wide` 16 beside it.
+    lib += &user(
+        "hub",
+        fifteen().chain(["inner::deep".to_owned()]),
+        "pub mod inner { pub mod deep { pub fn f() -> u32 { 2 } } }",
+    );
+    lib += &user("wide", fifteen().chain(["crate::m16".to_owned()]), "");
+    for at in 1..=10 {
+        lib += &format!(
+            "pub mod c{at} {{ pub fn call() -> u32 {{ crate::hub::g() + crate::wide::g() }} }}\n"
+        );
+    }
+    let workspace = scratch_workspace(
+        "fold_god_hub",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"hubs\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+        ],
+    );
+    let coupled = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("high-fan-out ") || key.starts_with("god-hub "))
+            .collect()
+    };
+    assert_eq!(
+        coupled(keys(&workspace)),
+        [
+            "god-hub hubs::hub",
+            "god-hub hubs::wide",
+            "high-fan-out hubs::hub",
+            "high-fan-out hubs::wide",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[high-fan-out]\nfold-god-hub = true\n",
+    )
+    .unwrap();
+    assert_eq!(coupled(keys(&workspace)), ["high-fan-out hubs::wide"]);
+    let report = run(&workspace, &[]);
+    assert!(
+        report
+            .stdout
+            .contains("10 modules depend on it: hubs::c1, hubs::c10"),
+        "{}",
+        report.stdout
+    );
+}
+
+#[test]
+fn a_layer_sets_the_fan_out_limit_from_it_up_and_another_crate_counts_by_its_top_modules() {
+    // `low::l1` uses 16 of its crate's modules, 9 of them in `a`.
+    let mut low = format!(
+        "//! Low.\npub mod a {{\n{}}}\n{}",
+        leaves(numbered("x", 9)),
+        leaves(numbered("y", 7))
+    );
+    low += &user(
+        "l1",
+        numbered("crate::a::x", 9).chain(numbered("crate::y", 7)),
+        "",
+    );
+    let mut high = format!("//! High.\n{}", leaves(numbered("n", 18)));
+    // `h1` uses the 9 modules in `low::a` and 10 of its own: 19 modules, or
+    // 11 when `low::a` counts once.
+    high += &user(
+        "h1",
+        numbered("low::a::x", 9).chain(numbered("crate::n", 10)),
+        "",
+    );
+    high += &user("h2", numbered("crate::n", 17), "");
+    high += &user("h3", numbered("crate::n", 18), "");
+    let workspace = scratch_workspace(
+        "fan_out_by_layer",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"low\", \"high\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "low/Cargo.toml",
+                "[package]\nname = \"low\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            ("low/src/lib.rs", &low),
+            (
+                "high/Cargo.toml",
+                "[package]\nname = \"high\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\nlow = { path = \"../low\" }\n",
+            ),
+            ("high/src/lib.rs", &high),
+        ],
+    );
+    let fanned = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("high-fan-out "))
+            .collect()
+    };
+    assert_eq!(
+        fanned(keys(&workspace)),
+        [
+            "high-fan-out high::h1",
+            "high-fan-out high::h2",
+            "high-fan-out high::h3",
+            "high-fan-out low::l1",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "layers = [[\"low\"], [\"high\"]]\n[high-fan-out]\nmost-by-layer = { high = 17 }\n\
+         other-crates = \"top-module\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fanned(keys(&workspace)),
+        ["high-fan-out high::h3", "high-fan-out low::l1"]
     );
 }
