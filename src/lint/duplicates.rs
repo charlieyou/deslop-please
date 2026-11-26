@@ -56,7 +56,7 @@ fn check_functions(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<D
         entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
         // Deduplicate by exact location so macro expansions don't self-collide.
         entries.dedup_by(|a, b| a.2 == b.2);
-        if entries.len() < 2 {
+        if entries.len() < 2 || (model.settings.duplicate_code.simd && simd(model, &entries)) {
             continue;
         }
         if !entries
@@ -98,6 +98,17 @@ fn check_functions(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<D
         });
     }
     diagnostics
+}
+
+/// Whether every one of `entries` is a SIMD helper: compiled for a CPU's
+/// features, and calling its intrinsics.
+fn simd(model: &Model, entries: &[(String, NodeId, Location, ItemId)]) -> bool {
+    entries.iter().all(|&(.., id)| {
+        model.items[id.index()].metrics.is_some_and(|metrics| {
+            let codegen = metrics.codegen;
+            (codegen.inline_always || codegen.target_feature) && codegen.intrinsics
+        })
+    })
 }
 
 fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {

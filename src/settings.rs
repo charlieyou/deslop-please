@@ -36,10 +36,21 @@ pub struct Settings {
     pub long_file: LongFile,
     /// Which structs may hold many fields.
     pub wide_struct: WideStruct,
+    /// Which copies of a body are no duplicates.
+    pub duplicate_code: DuplicateCode,
     /// Features that build code only for tests, such as `test-utils`. Set,
     /// even empty, it makes an item that a `cfg` attribute builds only for
     /// `test` or these features test code, as a module is.
     pub test_features: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct DuplicateCode {
+    /// Copies that each are `#[inline(always)]` or `#[target_feature]` and
+    /// call the CPU's intrinsics are SIMD helpers that each kernel module
+    /// keeps its own of, so that they compile with its features.
+    pub simd: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

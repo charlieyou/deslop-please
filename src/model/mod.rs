@@ -101,6 +101,9 @@ pub struct Codegen {
     pub cold: bool,
     /// `#[inline(always)]`.
     pub inline_always: bool,
+    /// Its body calls the CPU's intrinsics: it names an `_mm*` intrinsic or
+    /// a path through `arch`, such as `core::arch::x86_64::_rdtsc`.
+    pub intrinsics: bool,
 }
 
 /// An item's declared visibility, ordered from narrowest to widest.

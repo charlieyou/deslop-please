@@ -489,7 +489,15 @@ impl Source {
                 returns_string_error,
                 body_fingerprint,
                 positional_trap,
-                codegen: self.codegen(&tokens[..fn_pos]),
+                codegen: Codegen {
+                    intrinsics: body_tokens.iter().enumerate().any(|(at, t)| {
+                        let word = self.text(*t);
+                        word.starts_with("_mm")
+                            || (word == "arch"
+                                && body_tokens.get(at + 1).is_some_and(|t| self.is(*t, "::")))
+                    }),
+                    ..self.codegen(&tokens[..fn_pos])
+                },
                 decides,
             },
             first_type,

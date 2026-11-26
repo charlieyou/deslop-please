@@ -589,3 +589,71 @@ fn a_passive_record_and_a_command_lines_schema_may_be_wide_when_configured() {
     // A trait's method is no method of the record's own.
     assert_eq!(wide(keys(&workspace)), ["wide-struct records::Busy"]);
 }
+
+#[test]
+fn simd_helpers_each_kernel_keeps_a_copy_of_are_no_duplicates_when_configured() {
+    // A body of more than 45 tokens that calls `call` throughout.
+    let body = |call: &str| -> String {
+        let steps: String = (0..6)
+            .map(|at| format!("    let v{} = {call}(v{at}, x);\n", at + 1))
+            .collect();
+        format!("{{\n    let v0 = {call}(x, y);\n{steps}    v6\n}}\n")
+    };
+    let helpers = |attribute: &str| -> String {
+        format!(
+            "use core::arch::x86_64::*;\n\
+             {attribute}\npub fn lanes(x: u32, y: u32) -> u32 {}\
+             {attribute}\npub fn mixed(x: u32, y: u32) -> u32 {}\
+             #[inline(always)]\npub fn plain(x: u32, y: u32) -> u32 {}",
+            body("_mm_add_epi32"),
+            body("_mm_sub_epi32"),
+            body("u32::wrapping_add"),
+        )
+    };
+    let workspace = scratch_workspace(
+        "simd_duplicates",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"simd\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", "//! Kernels.\npub mod avx;\npub mod sse;\n"),
+            ("src/avx.rs", &helpers("#[inline(always)]")),
+            (
+                "src/sse.rs",
+                &helpers("#[target_feature(enable = \"sse2\")]").replacen(
+                    "#[target_feature(enable = \"sse2\")]\npub fn mixed",
+                    "pub fn mixed",
+                    1,
+                ),
+            ),
+        ],
+    );
+    let duplicates = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("duplicate-code "))
+            .collect()
+    };
+    assert_eq!(
+        duplicates(keys(&workspace)),
+        [
+            "duplicate-code simd::avx::lanes,simd::sse::lanes",
+            "duplicate-code simd::avx::mixed,simd::sse::mixed",
+            "duplicate-code simd::avx::plain,simd::sse::plain",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[duplicate-code]\nsimd = true\n",
+    )
+    .unwrap();
+    // Each copy must be compiled for the CPU and call its intrinsics; that
+    // its file imports them is not enough.
+    assert_eq!(
+        duplicates(keys(&workspace)),
+        [
+            "duplicate-code simd::avx::mixed,simd::sse::mixed",
+            "duplicate-code simd::avx::plain,simd::sse::plain",
+        ]
+    );
+}

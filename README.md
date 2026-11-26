@@ -117,6 +117,12 @@ home-module = true
 passive-records = true # a struct with no method of its own that takes `self` may be wide
 clap-derives = true    # so may one deriving clap's `Parser`, `Args` or `Subcommand`
 
+[duplicate-code]
+# Copies that each are `#[inline(always)]` or `#[target_feature]` and whose
+# bodies call the CPU's intrinsics (`_mm*`, `arch::`) are SIMD helpers each
+# kernel module keeps its own of.
+simd = true
+
 [long-file]
 skip-test-modules = true # an inline `#[cfg(test)] mod tests { .. }` counts no lines
 skip-generated = true    # a file marked `@generated` in its first 5 lines is not measured
