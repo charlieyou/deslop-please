@@ -625,6 +625,21 @@ fn a_passive_record_and_a_command_lines_schema_may_be_wide_when_configured() {
     .unwrap();
     // A trait's method is no method of the record's own.
     assert_eq!(wide(keys(&workspace)), ["wide-struct records::Busy"]);
+    // A record wider than its cap is reported anyway; one at it is not.
+    for (most, reported) in [
+        (16, vec!["wide-struct records::Busy"]),
+        (
+            15,
+            vec!["wide-struct records::Busy", "wide-struct records::Record"],
+        ),
+    ] {
+        std::fs::write(
+            workspace.join("deslop-please.toml"),
+            format!("[wide-struct]\npassive-records = true\nmost-passive-fields = {most}\nclap-derives = true\n"),
+        )
+        .unwrap();
+        assert_eq!(wide(keys(&workspace)), reported, "{most}");
+    }
 }
 
 #[test]

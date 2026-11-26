@@ -57,7 +57,11 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         let type_item = graph.things[thing.index()].item;
         if model.is_serde(type_item)
             || (policy.clap_derives && model.derives(type_item, &["Parser", "Args", "Subcommand"]))
-            || (policy.passive_records && !working.contains(&type_item))
+            || (policy.passive_records
+                && !working.contains(&type_item)
+                && policy
+                    .most_passive_fields
+                    .is_none_or(|most| struct_fields.len() <= most))
         {
             continue;
         }
