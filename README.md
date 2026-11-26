@@ -97,6 +97,14 @@ most-by-layer = { core = 20, cli = 25 }
 # A use of another crate's module counts as one of its top module,
 # `crate::top_module`; default "module".
 other-crates = "top-module"
+
+[field-leak]
+# A struct with no private field is plain data, which guards nothing:
+# `shared-mutable-bag` judges it, not `field-leak`.
+plain-data = true
+# Code in a type's module is inside it for its private fields, as rustc
+# lets it be; a private field it alone uses keeps the struct guarding.
+home-module = true
 ```
 
 ### Add to your `AGENTS.md`

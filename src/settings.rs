@@ -30,6 +30,19 @@ pub struct Settings {
     pub string_error: StringError,
     /// How `high-fan-out` counts, and how much it lets through.
     pub high_fan_out: HighFanOut,
+    /// Which structs guard their fields, and who is inside them.
+    pub field_leak: FieldLeak,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct FieldLeak {
+    /// A struct with no private field is plain data, which guards nothing:
+    /// `shared-mutable-bag` judges it, not `field-leak`.
+    pub plain_data: bool,
+    /// Code in a type's home module is inside it for its private fields,
+    /// which rustc lets that module use.
+    pub home_module: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

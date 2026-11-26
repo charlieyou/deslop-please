@@ -19,7 +19,7 @@ use super::{
     without_generics,
 };
 use crate::graph::{Graph, ThingId, Use};
-use crate::model::{ItemId, ItemKind, Model, NodeId};
+use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility};
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let mut fields: BTreeMap<ThingId, Vec<ItemId>> = BTreeMap::new();
@@ -35,6 +35,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             fields.entry(thing).or_default().push(ItemId::new(index));
         }
     }
+    let policy = &model.settings.field_leak;
     let mut outside: HashMap<ItemId, Vec<&Use>> = HashMap::new();
     let mut working: HashSet<ThingId> = HashSet::new();
     for usage in &graph.uses {
@@ -50,7 +51,9 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let tangle = graph.tangle_of[owner.index()];
         let insider = usage.user.is_some_and(|user| {
             user == owner || (tangle.is_some() && graph.tangle_of[user.index()] == tangle)
-        });
+        }) || (policy.home_module
+            && field.visibility == Visibility::Private
+            && model.references[usage.reference].from == graph.things[owner.index()].home);
         if !insider {
             outside.entry(usage.item).or_default().push(usage);
         } else if usage.user == Some(owner) && works(model, usage) {
@@ -62,7 +65,11 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let kept = fields.iter().any(|field| !outside.contains_key(field));
         let type_item = graph.things[thing.index()].item;
         let is_serde = model.serde_types.contains(&type_item);
-        if !kept || !working.contains(&thing) {
+        let plain = policy.plain_data
+            && fields
+                .iter()
+                .all(|field| model.items[field.index()].visibility != Visibility::Private);
+        if !kept || !working.contains(&thing) || plain {
             if let Some(diag) = shared_mutable_bag(model, graph, thing, &fields, &outside, scope) {
                 diagnostics.push(diag);
             }

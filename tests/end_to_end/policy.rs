@@ -367,3 +367,61 @@ fn a_layer_sets_the_fan_out_limit_from_it_up_and_another_crate_counts_by_its_top
         ["high-fan-out high::h3", "high-fan-out low::l1"]
     );
 }
+
+#[test]
+fn plain_data_is_a_bag_and_a_types_module_is_inside_it_for_its_private_fields_when_configured() {
+    let lib = "//! Data.\n\
+pub mod data {
+    pub struct Plain { pub a: Vec<u32>, pub b: Vec<u32>, pub c: Vec<u32> }
+    impl Plain {
+        pub fn new() -> Plain { Plain { a: Vec::new(), b: Vec::new(), c: Vec::new() } }
+        pub fn total(&self) -> usize { self.c.len() }
+    }
+    pub struct Kept { pub d: Vec<u32>, e: Vec<u32>, f: Vec<u32> }
+    impl Kept {
+        pub fn new() -> Kept { Kept { d: Vec::new(), e: Vec::new(), f: Vec::new() } }
+        pub fn total(&self) -> usize { self.f.len() }
+    }
+    pub fn poke(kept: &mut Kept) { kept.d.push(1); kept.e.push(2); }
+}
+pub mod x { pub fn grow(plain: &mut crate::data::Plain) { plain.a.push(1); } }
+pub mod y { pub fn grow(plain: &mut crate::data::Plain) { plain.b.push(1); } }
+";
+    let workspace = scratch_workspace(
+        "plain_data",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"bags\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+        ],
+    );
+    let leaks = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("field-leak ") || key.starts_with("shared-mutable-bag "))
+            .collect()
+    };
+    assert_eq!(
+        leaks(keys(&workspace)),
+        [
+            "field-leak bags::data::Kept::d",
+            "field-leak bags::data::Kept::e",
+            "field-leak bags::data::Plain::a",
+            "field-leak bags::data::Plain::b",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[field-leak]\nplain-data = true\nhome-module = true\n",
+    )
+    .unwrap();
+    // `poke` may use the private `e`, not the `pub` `d`.
+    assert_eq!(
+        leaks(keys(&workspace)),
+        [
+            "field-leak bags::data::Kept::d",
+            "shared-mutable-bag bags::data::Plain",
+        ]
+    );
+}
