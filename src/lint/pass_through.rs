@@ -45,10 +45,7 @@ fn check_wrappers(
 
     for (func, wrapper) in wrappers {
         let item = &model.items[func.index()];
-        if item.trait_impl
-            || tree.is_test(item.owner)
-            || item.file.is_some_and(|file| model.files[file.index()].test)
-        {
+        if item.trait_impl || model.in_tests(item) {
             continue;
         }
         let home = graph.thing_of[func.index()]

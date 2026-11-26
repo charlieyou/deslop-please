@@ -35,8 +35,7 @@ fn check_scattered_impls(model: &Model, graph: &Graph, scope: Option<NodeId>) ->
         if !matches!(item.kind, ItemKind::Function | ItemKind::Constant) || item.trait_impl {
             continue;
         }
-        if tree.is_test(item.owner) || item.file.is_some_and(|file| model.files[file.index()].test)
-        {
+        if model.in_tests(item) {
             continue;
         }
         let Some(thing) = graph.thing_of[index] else {
@@ -158,7 +157,7 @@ fn check_single_impl_traits(model: &Model, scope: Option<NodeId>) -> Vec<Diagnos
     let mut diagnostics = Vec::new();
     for id in traits {
         let item = &model.items[id.index()];
-        if tree.is_test(item.owner) || item.file.is_some_and(|f| model.files[f.index()].test) {
+        if model.in_tests(item) {
             continue;
         }
         let Some(pkg) = tree.package_of(item.owner) else {

@@ -485,3 +485,58 @@ fn a_files_inline_test_modules_and_a_generated_file_count_no_lines_when_configur
         report.stdout
     );
 }
+
+#[test]
+fn what_a_cfg_builds_for_tests_or_a_test_feature_is_test_code_when_configured() {
+    let lib = "//! Core.\n\
+pub fn run() -> u32 { after() }
+pub fn raw() -> u32 { 2 }
+#[cfg(any(test, feature = \"test-utils\"))]
+pub fn fixture() -> u32 { raw() + 1 }
+#[cfg(feature = \"test-utils\")]
+pub struct Probe<T, U> { pub a: T, pub b: U }
+pub fn after() -> u32 { 3 }
+#[cfg(feature = \"test-utils\")]
+pub mod support { pub fn make() -> crate::Probe<u8, u16> { crate::Probe { a: 1, b: 2 } } }
+";
+    let it = "#[test]\nfn uses() {\n    let probe = core_t::support::make();\n    \
+              assert_eq!(core_t::fixture() + u32::from(probe.a) + u32::from(probe.b), 6);\n}\n";
+    let workspace = private_pair(
+        "test_features",
+        lib,
+        "fn main() { println!(\"{}\", core_t::run()); }\n",
+        &[
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core_t\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+                 [features]\ndefault = [\"test-utils\"]\ntest-utils = []\n",
+            ),
+            ("core/tests/it.rs", it),
+        ],
+    );
+    let surface = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("test-only-pub ") || key.starts_with("over-public "))
+            .collect()
+    };
+    assert_eq!(
+        surface(keys(&workspace)),
+        [
+            "over-public core_t::after",
+            "over-public core_t::raw",
+            "test-only-pub core_t::fixture",
+            "test-only-pub core_t::support",
+            "test-only-pub core_t::support::make",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "test-features = [\"test-utils\"]\n",
+    )
+    .unwrap();
+    // `raw` is for tests now; `after`, past the generic `Probe`, is not.
+    assert_eq!(
+        surface(keys(&workspace)),
+        ["over-public core_t::after", "test-only-pub core_t::raw"]
+    );
+}

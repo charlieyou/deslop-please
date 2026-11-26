@@ -394,7 +394,8 @@ impl<'a> Builder<'a> {
         let package_root = self.target_roots.get(&*document.path) == Some(&module);
         check_files_module(first, source.whole(), package_root).map_err(not_understood)?;
         let file = FileId::new(self.files.len());
-        let declarations = source.declarations(&[]);
+        let test_features = self.workspace.settings.test_features.as_deref();
+        let declarations = source.declarations(test_features.unwrap_or_default());
         self.files.push(File {
             path: document.path.to_string(),
             module,
@@ -1094,9 +1095,12 @@ impl<'a> Builder<'a> {
                     || built_for_tests.contains(&id)
                     || (test_modules.contains(&id) && !non_test_modules.contains(&id)));
         }
+        let gated = self.workspace.settings.test_features.is_some();
         for reference in &mut self.references {
-            reference.test =
-                self.files[reference.file.index()].test || self.tree.is_test(reference.from);
+            let file = &self.files[reference.file.index()];
+            reference.test = file.test
+                || self.tree.is_test(reference.from)
+                || (gated && file.tests_only_at(reference.line));
         }
         for glob in &mut self.glob_reexports {
             glob.test = self.files[glob.file.index()].test || self.tree.is_test(glob.from);

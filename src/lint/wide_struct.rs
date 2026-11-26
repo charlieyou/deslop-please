@@ -33,8 +33,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         if item.kind == ItemKind::Field
             && of_struct
             && !item.holds_nothing
-            && !tree.is_test(item.owner)
-            && item.file.is_none_or(|file| !model.files[file.index()].test)
+            && !model.in_tests(item)
             && !model.in_example(item.file)
             && let Some(thing) = graph.thing_of[index]
         {
@@ -93,8 +92,7 @@ fn check_enums(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagn
             .is_some_and(|parent| model.items[parent.index()].kind == ItemKind::Type);
         if item.kind == ItemKind::Variant
             && of_enum
-            && !tree.is_test(item.owner)
-            && item.file.is_none_or(|file| !model.files[file.index()].test)
+            && !model.in_tests(item)
             && let Some(thing) = graph.thing_of[index]
         {
             variants.entry(thing).or_default().push(ItemId::new(index));

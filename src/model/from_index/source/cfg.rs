@@ -89,6 +89,9 @@ impl Source {
         let mut assigned = false;
         // How deep in generics' `<..>` the header is.
         let mut angles = 0i32;
+        // In a `where` clause, or a closure's `|..|`, a `,` ends nothing.
+        let mut clause = false;
+        let mut pipes = false;
         let mut at = from;
         let last = loop {
             let token = *tokens.get(at)?;
@@ -98,7 +101,14 @@ impl Source {
                 // The end of what holds it: a field's, an argument's.
                 (Kind::Close, _) => break at.checked_sub(1)?,
                 (_, ";") => break at,
-                (_, ",") if angles <= 0 => break at.checked_sub(1)?,
+                (_, ",") if angles <= 0 && !clause && !pipes => break at.checked_sub(1)?,
+                (_, "where") if !assigned => clause = true,
+                // A closure's `|` comes right after `=` or `move`; another
+                // is an or, `A = 1 | 2,`.
+                (_, "|") if pipes => pipes = false,
+                (_, "|") if assigned && matches!(self.text(tokens[at - 1]), "=" | "move") => {
+                    pipes = true;
+                }
                 (_, "=") if angles <= 0 => assigned = true,
                 (_, "<") if !assigned => angles += 1,
                 (_, ">") if !assigned => angles -= 1,
@@ -220,6 +230,69 @@ mod tests {
                 ("only".to_owned(), true),
                 ("moved".to_owned(), true),
                 ("nested".to_owned(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_item_built_for_tests_spans_its_attributes_to_its_end() {
+        let text = "\
+#[cfg(test)]
+#[derive(Debug)]
+struct Pair<A, B = u8> {
+    a: A,
+    b: B,
+}
+#[cfg(feature = \"test-utils\")]
+const ORIGIN: Point = Point { x: 0, y: 0 };
+#[cfg(any(test, feature = \"test-utils\"))]
+pub(crate) mod fixtures {
+    #[cfg(test)]
+    pub fn make() -> u8 { 1 }
+}
+struct Holder {
+    #[cfg(test)]
+    seen: u32,
+    kept: u32,
+}
+#[cfg(feature = \"other\")]
+fn other() {}
+#[cfg(test)]
+fn sum<A, B>(a: A, b: B) -> u8
+where
+    A: Into<u8>,
+    B: Into<u8>,
+{
+    a.into() + b.into()
+}
+#[cfg(test)]
+static ADD: fn(u8, u8) -> u8 = |a, b| {
+    a + b
+};
+enum Flags {
+    #[cfg(test)]
+    A = 1 | 2,
+    B = 4,
+}
+";
+        let source = Source::new(text.into());
+        let built: Vec<((u32, u32), bool)> = source
+            .declarations(&["test-utils".to_owned()])
+            .for_tests
+            .into_iter()
+            .map(|built| (built.lines, built.inline_module))
+            .collect();
+        assert_eq!(
+            built,
+            [
+                ((1, 6), false),
+                ((7, 8), false),
+                ((9, 13), true),
+                ((11, 12), false),
+                ((15, 16), false),
+                ((21, 28), false),
+                ((29, 32), false),
+                ((34, 35), false),
             ]
         );
     }

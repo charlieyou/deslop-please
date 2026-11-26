@@ -35,8 +35,7 @@ fn check_functions(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<D
         let Some(fp) = item.metrics.and_then(|m| m.body_fingerprint) else {
             continue;
         };
-        if tree.is_test(item.owner) || item.file.is_some_and(|file| model.files[file.index()].test)
-        {
+        if model.in_tests(item) {
             continue;
         }
         let id = ItemId::new(index);
@@ -111,8 +110,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         if item.kind == ItemKind::Field
             && of_struct
             && !item.holds_nothing
-            && !tree.is_test(item.owner)
-            && item.file.is_none_or(|f| !model.files[f.index()].test)
+            && !model.in_tests(item)
             && let Some(thing) = graph.thing_of[index]
         {
             let leaf = item.name.rsplit("::").next().unwrap_or(&item.name);

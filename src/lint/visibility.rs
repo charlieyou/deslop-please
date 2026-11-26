@@ -198,8 +198,7 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
 
     for item in &model.items {
         if item.kind != ItemKind::Module
-            && !tree.is_test(item.owner)
-            && item.file.is_none_or(|f| !model.files[f.index()].test)
+            && !model.in_tests(item)
             && let Some(pkg) = tree.package_of(item.owner)
         {
             let mut cur = Some(item.owner);
@@ -666,7 +665,7 @@ fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
     }
     let file = item.file?;
     let file_info = &model.files[file.index()];
-    if file_info.test || tree.is_test(item.owner) {
+    if model.in_tests(item) {
         return None;
     }
     if item.visibility == Visibility::Pub && file_info.target != Some(TargetKind::Library) {

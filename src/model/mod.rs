@@ -189,6 +189,16 @@ pub struct File {
     pub generated: bool,
 }
 
+impl File {
+    /// Whether an item its `cfg` attributes build only for tests holds
+    /// `line`, 1-based.
+    pub fn tests_only_at(&self, line: u32) -> bool {
+        self.for_tests
+            .iter()
+            .any(|built| (built.lines.0..=built.lines.1).contains(&line))
+    }
+}
+
 /// An item built only for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForTests {
@@ -298,6 +308,18 @@ pub enum Wrapper {
 }
 
 impl Model {
+    /// Whether `item` is test code: in a test target, in a module built
+    /// only for tests, or, when `test-features` is set, an item that a
+    /// `cfg` attribute builds only for tests or those features.
+    pub fn in_tests(&self, item: &Item) -> bool {
+        self.tree.is_test(item.owner)
+            || item.file.is_some_and(|file| {
+                let file = &self.files[file.index()];
+                file.test
+                    || (self.settings.test_features.is_some() && file.tests_only_at(item.line))
+            })
+    }
+
     /// Whether `file` is in an example target. An example's root module is
     /// its package's, so its code would count as the crate's own.
     pub fn in_example(&self, file: Option<FileId>) -> bool {

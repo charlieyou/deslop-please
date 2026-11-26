@@ -34,6 +34,10 @@ pub struct Settings {
     pub field_leak: FieldLeak,
     /// Which lines of a file count.
     pub long_file: LongFile,
+    /// Features that build code only for tests, such as `test-utils`. Set,
+    /// even empty, it makes an item that a `cfg` attribute builds only for
+    /// `test` or these features test code, as a module is.
+    pub test_features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

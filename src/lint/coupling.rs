@@ -44,8 +44,7 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
     for reference in model.references.iter().filter(|r| !r.test) {
         let item = &model.items[reference.item.index()];
         if item.kind == ItemKind::Module
-            || tree.is_test(item.owner)
-            || item.file.is_some_and(|file| model.files[file.index()].test)
+            || model.in_tests(item)
             || model.in_example(Some(reference.file))
             || model.in_example(item.file)
         {

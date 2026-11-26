@@ -61,6 +61,13 @@ layers = [
 # code uses counts as a use from another crate, its tests' as a test's.
 consumers = ["crates/gpu", "../app/crates/app-solver"]
 
+# Features that build code only for tests. Set, even empty, it makes an item
+# that a `cfg` attribute builds only for `test` or one of these features test
+# code, as `#[cfg(test)] mod` makes a module: `#[cfg(any(test, feature =
+# "test-utils"))] pub fn fixture()` is no candidate for `test-only-pub`, and
+# what it uses, tests use.
+test-features = ["test-utils"]
+
 # Hot code that numeric work makes wide and long, held to finite limits of
 # its own: no lint is off for it. A path, relative to the workspace's root,
 # names a file or a directory, and its last segment names `<segment>.rs`

@@ -16,8 +16,7 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let mut ties: BTreeMap<NodeId, BTreeMap<(NodeId, NodeId), Tie>> = BTreeMap::new();
     for reference in model.references.iter().filter(|r| !r.test) {
         let item = &model.items[reference.item.index()];
-        let test = tree.is_test(item.owner)
-            || item.file.is_some_and(|file| model.files[file.index()].test);
+        let test = model.in_tests(item);
         if item.kind == ItemKind::Module || test {
             continue;
         }

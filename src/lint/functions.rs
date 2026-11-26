@@ -67,10 +67,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let Some(metrics) = item.metrics else {
             continue;
         };
-        if tree.is_test(item.owner)
-            || item.file.is_some_and(|file| model.files[file.index()].test)
-            || model.in_example(item.file)
-        {
+        if model.in_tests(item) || model.in_example(item.file) {
             continue;
         }
         let id = ItemId::new(index);

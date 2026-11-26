@@ -93,12 +93,9 @@ impl Graph {
 /// Each thing, and the thing each item is part of: the item at the top of its
 /// chain of parents, if that is a non-test type, function or constant.
 fn things(model: &Model) -> (Vec<Thing>, Vec<Option<ThingId>>) {
-    let tree = &model.tree;
     let counted = |id: ItemId| {
         let item = &model.items[id.index()];
-        item.kind != ItemKind::Module
-            && !tree.is_test(item.owner)
-            && item.file.is_none_or(|file| !model.files[file.index()].test)
+        item.kind != ItemKind::Module && !model.in_tests(item)
     };
     let mut things = Vec::new();
     let mut of_root: Vec<Option<ThingId>> = vec![None; model.items.len()];
