@@ -159,6 +159,7 @@ impl<'a> Builder<'a> {
         self.mark_lent_reads(&wrappers);
         let crate_deps = self.collect_crate_deps();
         let mut mentions = self.text_mentions();
+        mentions.extend(self.macro_mentions());
         mentions.extend(consumed.iter().filter_map(|(symbol, test)| {
             match self.symbols.get(symbol.as_str()) {
                 Some(&Named::Item(item)) => Some(Mention {
@@ -273,6 +274,56 @@ impl<'a> Builder<'a> {
                         from: Some((unit.file, from)),
                     });
                 }
+            }
+        }
+        mentions
+    }
+
+    /// What `macro_rules!` bodies use, which the index sees no reference to:
+    /// a field or method of a type of its crate that a body writes an `impl`
+    /// block of, named in that body, as `Self { numerators, .. }` in
+    /// `impl AverageRow<$atomic> { .. }`. Each is used where the body is.
+    fn macro_mentions(&self) -> Vec<Mention> {
+        // By its package and type's last name, each member of a type.
+        let mut members: HashMap<(Option<NodeId>, &str), Vec<ItemId>> = HashMap::new();
+        for (index, item) in self.items.iter().enumerate() {
+            if let Some(parent) = item.parent
+                && matches!(item.kind, ItemKind::Field | ItemKind::Function)
+                && self.items[parent.index()].kind == ItemKind::Type
+            {
+                let parent = &self.items[parent.index()];
+                let ty = parent.name.rsplit("::").next().unwrap_or(&parent.name);
+                let package = self.tree.package_of(parent.owner);
+                members
+                    .entry((package, ty))
+                    .or_default()
+                    .push(ItemId::new(index));
+            }
+        }
+        let mut mentions = Vec::new();
+        for unit in &self.units {
+            let file = &self.files[unit.file.index()];
+            let package = self.tree.package_of(file.module);
+            for body in &unit.macros.bodies {
+                let from = unit
+                    .inline_modules
+                    .innermost(body.range)
+                    .unwrap_or(file.module);
+                let test = file.test || self.tree.is_test(from);
+                let named = body
+                    .types
+                    .iter()
+                    .flat_map(|ty| members.get(&(package, ty.as_str())).into_iter().flatten())
+                    .filter(|item| {
+                        let name = &self.items[item.index()].name;
+                        body.names
+                            .contains(name.rsplit("::").next().unwrap_or(name))
+                    });
+                mentions.extend(named.map(|&item| Mention {
+                    item,
+                    test,
+                    from: Some((unit.file, from)),
+                }));
             }
         }
         mentions

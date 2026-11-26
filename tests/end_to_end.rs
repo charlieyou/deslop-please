@@ -1593,6 +1593,10 @@ pub mod limits { pub const MAX: u32 = 9; pub const MIN: u32 = 0; pub const TOP: 
 pub mod prelude { pub use crate::limits::TOP; }
 pub mod glob { use crate::prelude::{self, *}; pub fn top() -> String { format!(\"{TOP}\") } }
 pub mod named { use crate::limits::MAX; const MIN: u32 = 1; pub fn f() -> String { format!(\"{MAX}{MIN}\") } }
+pub struct Row { pub cells: Vec<u32>, pub shift: u8 }
+pub struct Other { pub cells: Vec<u32> }
+macro_rules! row { () => { impl Row { pub fn new() -> Self { Self { cells: Vec::new(), shift: 0 } } } }; }
+row!();
 ";
     let main = "\
 use core_t::LIMIT;
@@ -1602,7 +1606,7 @@ fn main() {
     let view = View { depth: core_t::Depth(1) };
     let rows = core_t::Rows::new();
     let _ = format!(\"{LIMIT} {} {:>width$} {width:>3}\", view.depth.0, rows.len(), width = 2);
-    let _ = (core_t::shown::show(), core_t::glob::top(), core_t::named::f());
+    let _ = (core_t::shown::show(), core_t::glob::top(), core_t::named::f(), core_t::Row::new());
 }
 ";
     let serde = "\
@@ -1636,13 +1640,17 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
     // `{width:>3}` captures the argument `width`, no function: only a
     // value can be captured, and `{WIDE}` only its own module's constant.
     // A glob brings in what its module re-exports; `use limits::MAX` no `MIN`.
+    // `row!`'s body uses the fields of `Row`, which it implements, not `Other`'s.
     assert_eq!(
         keys(&workspace),
         [
+            "over-public core_t::Row::cells",
+            "over-public core_t::Row::shift",
             "over-public core_t::limits",
             "over-public core_t::limits::MAX",
             "over-public core_t::limits::TOP",
             "over-public core_t::shown::WIDE",
+            "unused-pub core_t::Other",
             "unused-pub core_t::hidden",
             "unused-pub core_t::hidden::WIDE",
             "unused-pub core_t::limits::MIN",

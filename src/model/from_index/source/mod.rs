@@ -77,6 +77,19 @@ pub struct Macros {
     pub impls: Vec<(String, String)>,
     /// The name of each macro invoked, once per invocation.
     pub invoked: Vec<String>,
+    /// Each body's code that the index does not see: the types it writes
+    /// `impl` blocks of, by their last names, and the names it writes.
+    pub bodies: Vec<MacroBody>,
+}
+
+/// A `macro_rules!` body, which only its expansions resolve.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MacroBody {
+    pub range: Range,
+    /// The types it writes `impl X` or `impl Trait for X` of.
+    pub types: Vec<String>,
+    /// Every name it writes.
+    pub names: HashSet<String>,
 }
 
 /// Parsed pieces of an `impl` block header before its `{`.
@@ -240,6 +253,15 @@ impl Source {
                         continue;
                     };
                     let body = &tokens[at + 3..close];
+                    let mut written = MacroBody {
+                        range: self.range(tokens[at].start, tokens[close].end),
+                        names: body
+                            .iter()
+                            .filter(|t| t.kind == Kind::Ident)
+                            .map(|t| self.text(*t).to_owned())
+                            .collect(),
+                        types: Vec::new(),
+                    };
                     for (index, word) in body.iter().enumerate() {
                         if !self.is(*word, "impl") {
                             continue;
@@ -269,7 +291,26 @@ impl Source {
                                 self.text(*name_of_trait).to_owned(),
                             ));
                         }
+                        // The type: the last name outside generic arguments,
+                        // after `for` if there is one.
+                        let self_type = body[index + 1..]
+                            .iter()
+                            .take_while(|t| !self.is(**t, "{") && !self.is(**t, ";"))
+                            .skip(if has_for { before_for.len() + 1 } else { 0 });
+                        let mut depth = 0;
+                        let mut named = None;
+                        for &part in self_type {
+                            match self.text(part) {
+                                "<" => depth += 1,
+                                ">" => depth -= 1,
+                                "where" if depth == 0 => break,
+                                _ if depth == 0 && part.kind == Kind::Ident => named = Some(part),
+                                _ => {}
+                            }
+                        }
+                        written.types.extend(named.map(|t| self.text(t).to_owned()));
                     }
+                    macros.bodies.push(written);
                 }
                 Some(open) if !defines && open.kind == Kind::Open => {
                     macros.invoked.push(self.text(*token).to_owned());
