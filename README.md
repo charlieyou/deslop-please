@@ -113,6 +113,10 @@ plain-data = true
 # lets it be; a private field it alone uses keeps the struct guarding.
 home-module = true
 
+[wide-struct]
+passive-records = true # a struct with no method of its own that takes `self` may be wide
+clap-derives = true    # so may one deriving clap's `Parser`, `Args` or `Subcommand`
+
 [long-file]
 skip-test-modules = true # an inline `#[cfg(test)] mod tests { .. }` counts no lines
 skip-generated = true    # a file marked `@generated` in its first 5 lines is not measured

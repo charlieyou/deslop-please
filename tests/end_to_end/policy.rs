@@ -540,3 +540,52 @@ pub mod support { pub fn make() -> crate::Probe<u8, u16> { crate::Probe { a: 1, 
         ["over-public core_t::after", "test-only-pub core_t::raw"]
     );
 }
+
+#[test]
+fn a_passive_record_and_a_command_lines_schema_may_be_wide_when_configured() {
+    let fields: String = (0..16).map(|at| format!("pub f{at}: u32, ")).collect();
+    let zero: String = (0..16).map(|at| format!("f{at}: 0, ")).collect();
+    let lib = format!(
+        "//! Records.\n\
+         pub struct Busy {{ {fields} }}\n\
+         impl Busy {{ pub fn sum(&self) -> u32 {{ self.f0 + self.f15 }} }}\n\
+         pub struct Record {{ {fields} }}\n\
+         impl Record {{ pub fn new() -> Record {{ Record {{ {zero} }} }} }}\n\
+         impl std::fmt::Display for Record {{\n    \
+             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{{}}\", self.f0) }}\n\
+         }}\n\
+         #[derive(Parser)]\n\
+         pub struct Flags {{ {fields} }}\n\
+         impl Flags {{ pub fn first(&self) -> u32 {{ self.f0 }} }}\n"
+    );
+    let workspace = scratch_workspace(
+        "passive_records",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"records\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+        ],
+    );
+    let wide = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("wide-struct "))
+            .collect()
+    };
+    assert_eq!(
+        wide(keys(&workspace)),
+        [
+            "wide-struct records::Busy",
+            "wide-struct records::Flags",
+            "wide-struct records::Record",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[wide-struct]\npassive-records = true\nclap-derives = true\n",
+    )
+    .unwrap();
+    // A trait's method is no method of the record's own.
+    assert_eq!(wide(keys(&workspace)), ["wide-struct records::Busy"]);
+}

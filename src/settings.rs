@@ -34,10 +34,23 @@ pub struct Settings {
     pub field_leak: FieldLeak,
     /// Which lines of a file count.
     pub long_file: LongFile,
+    /// Which structs may hold many fields.
+    pub wide_struct: WideStruct,
     /// Features that build code only for tests, such as `test-utils`. Set,
     /// even empty, it makes an item that a `cfg` attribute builds only for
     /// `test` or these features test code, as a module is.
     pub test_features: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct WideStruct {
+    /// A struct with no method of its own that takes `self` is a record
+    /// that holds data for others, which a flat list of fields suits.
+    pub passive_records: bool,
+    /// A struct deriving clap's `Parser`, `Args` or `Subcommand` is a
+    /// command line's schema, flat as its flags are.
+    pub clap_derives: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

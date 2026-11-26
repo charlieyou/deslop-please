@@ -2,7 +2,7 @@
 //! once. Structs deriving `Serialize` or `Deserialize` are exempt so wire/config
 //! schemas stay flat; internal stateful bags want cohesive sub-structs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::{
     Diagnostic, Lint, Picture, counted, full_name, in_scope, item_location, listed,
@@ -41,13 +41,24 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         }
     }
 
+    let policy = &model.settings.wide_struct;
+    // The types with a method of their own that takes `self`.
+    let working: HashSet<ItemId> = model
+        .items
+        .iter()
+        .filter(|item| item.kind == ItemKind::Function && item.takes_self && !item.trait_impl)
+        .filter_map(|item| item.parent)
+        .collect();
     let mut diagnostics = Vec::new();
     for (thing, struct_fields) in fields {
         if struct_fields.len() <= MOST_FIELDS {
             continue;
         }
         let type_item = graph.things[thing.index()].item;
-        if model.is_serde(type_item) {
+        if model.is_serde(type_item)
+            || (policy.clap_derives && model.derives(type_item, &["Parser", "Args", "Subcommand"]))
+            || (policy.passive_records && !working.contains(&type_item))
+        {
             continue;
         }
         let home = graph.things[thing.index()].home;
