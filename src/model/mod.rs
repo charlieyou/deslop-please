@@ -36,8 +36,8 @@ pub struct Model {
     pub crate_deps: Vec<CrateDep>,
     /// What the workspace's `deslop-please.toml` says.
     pub settings: Settings,
-    /// Structs/enums deriving `Serialize` or `Deserialize`.
-    pub serde_types: HashSet<ItemId>,
+    /// What each type derives, by each macro's last name: `Serialize`.
+    pub derives: HashMap<ItemId, Vec<String>>,
     /// Each field's declared type, as its tokens without paths or
     /// lifetimes: `[ Card ; 4 ]`.
     pub field_types: HashMap<ItemId, String>,
@@ -308,6 +308,19 @@ pub enum Wrapper {
 }
 
 impl Model {
+    /// Whether `item` derives one of `macros`.
+    pub fn derives(&self, item: ItemId, macros: &[&str]) -> bool {
+        self.derives
+            .get(&item)
+            .is_some_and(|derived| derived.iter().any(|name| macros.contains(&name.as_str())))
+    }
+
+    /// Whether `item` is a serde schema: it derives `Serialize` or
+    /// `Deserialize`.
+    pub fn is_serde(&self, item: ItemId) -> bool {
+        self.derives(item, &["Serialize", "Deserialize"])
+    }
+
     /// Whether `item` is test code: in a test target, in a module built
     /// only for tests, or, when `test-features` is set, an item that a
     /// `cfg` attribute builds only for tests or those features.

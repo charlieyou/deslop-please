@@ -64,7 +64,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
     for (thing, fields) in fields {
         let kept = fields.iter().any(|field| !outside.contains_key(field));
         let type_item = graph.things[thing.index()].item;
-        let is_serde = model.serde_types.contains(&type_item);
+        let is_serde = model.is_serde(type_item);
         let plain = policy.plain_data
             && fields
                 .iter()

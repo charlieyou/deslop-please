@@ -148,7 +148,7 @@ impl<'a> Builder<'a> {
         self.mark_test_code();
         self.place_in_types();
         self.mark_function_info();
-        let serde_types = self.collect_serde_types();
+        let derives = self.collect_derives();
         let trait_impls = self.collect_trait_impls(&traits);
         self.mark_copies();
         let field_types = self.mark_markers();
@@ -182,7 +182,7 @@ impl<'a> Builder<'a> {
             module_reexports: self.module_reexports,
             crate_deps,
             settings: self.workspace.settings.clone(),
-            serde_types,
+            derives,
             field_types,
             traits,
             trait_impls,
@@ -659,20 +659,21 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Finds workspace structs/enums deriving `Serialize` or `Deserialize`.
-    fn collect_serde_types(&self) -> HashSet<ItemId> {
-        let mut serde = HashSet::new();
+    /// What each workspace type derives, by each macro's last name.
+    fn collect_derives(&self) -> HashMap<ItemId, Vec<String>> {
+        let mut derives = HashMap::new();
         for (&item, &definition) in &self.definitions {
             if self.items[item.index()].kind != ItemKind::Type {
                 continue;
             }
-            if let Some((at, range)) = definition
-                && self.units[at].source.has_serde_derive(range)
-            {
-                serde.insert(item);
+            if let Some((at, range)) = definition {
+                let derived = self.units[at].source.derives(range);
+                if !derived.is_empty() {
+                    derives.insert(item, derived);
+                }
             }
         }
-        serde
+        derives
     }
 
     /// Marks the references to fields that only read the field's value: a

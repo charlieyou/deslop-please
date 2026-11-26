@@ -642,7 +642,7 @@ fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
             return None;
         }
         let parent = item.parent?;
-        if model.serde_types.contains(&parent) {
+        if model.is_serde(parent) {
             return None;
         }
     }

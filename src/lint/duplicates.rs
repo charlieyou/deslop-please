@@ -138,7 +138,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         fields.sort();
         let type_item = graph.things[thing.index()].item;
         let home = graph.things[thing.index()].home;
-        let is_serde = model.serde_types.contains(&type_item);
+        let is_serde = model.is_serde(type_item);
         let key = full_name(model, graph, thing);
         let location = item_location(model, type_item);
         groups
@@ -240,7 +240,10 @@ mod tests {
         let s1 = sample.item(a, "ConfigA", ItemKind::Type);
         let s2 = sample.item(b, "ConfigB", ItemKind::Type);
         let dto = sample.item(b, "ConfigJson", ItemKind::Type);
-        sample.model.serde_types.insert(dto);
+        sample
+            .model
+            .derives
+            .insert(dto, vec!["Deserialize".to_owned()]);
         for ty in [s1, s2, dto] {
             let home = sample.model.items[ty.index()].owner;
             let ty_name = sample.model.items[ty.index()].name.clone();

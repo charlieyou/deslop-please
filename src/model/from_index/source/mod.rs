@@ -585,11 +585,12 @@ impl Source {
         !head.iter().any(|t| self.is(*t, "self"))
     }
 
-    /// Whether the type written at `item` has `#[derive(... Serialize ...)]`
-    /// or `#[derive(... Deserialize ...)]`.
-    pub fn has_serde_derive(&self, item: Range) -> bool {
+    /// What the type written at `item` derives, by each macro's last name:
+    /// `Parser` for `#[derive(clap::Parser)]`.
+    pub fn derives(&self, item: Range) -> Vec<String> {
+        let mut derives = Vec::new();
         let Some(tokens) = self.tokens_in(item) else {
-            return false;
+            return derives;
         };
         let mut at = 0;
         while at < tokens.len() {
@@ -598,13 +599,18 @@ impl Source {
                     break;
                 };
                 let inner = &tokens[at + 2..close];
-                let is_derive = inner.first().is_some_and(|t| self.is(*t, "derive"));
-                if is_derive
-                    && inner
-                        .iter()
-                        .any(|t| matches!(self.text(*t), "Serialize" | "Deserialize"))
-                {
-                    return true;
+                if inner.first().is_some_and(|t| self.is(*t, "derive")) {
+                    derives.extend(
+                        inner
+                            .iter()
+                            .enumerate()
+                            .filter(|&(at, t)| {
+                                t.kind == Kind::Ident
+                                    && inner.get(at + 1).is_none_or(|next| !self.is(*next, "::"))
+                            })
+                            .skip(1)
+                            .map(|(_, t)| self.text(*t).to_owned()),
+                    );
                 }
                 at = close + 1;
                 continue;
@@ -614,7 +620,7 @@ impl Source {
             }
             at += 1;
         }
-        false
+        derives
     }
 
     /// What the text of the function written at `item` says about it, if it has a body.
@@ -1119,8 +1125,14 @@ pub use g::Item;\n";
         let dto = Source::new(
             "#[derive(Debug, Serialize, Deserialize)]\npub struct Dto { a: u32 }".into(),
         );
-        assert!(dto.has_serde_derive(dto.whole()));
-        let plain = Source::new("#[derive(Debug, Clone)]\npub struct Plain { a: u32 }".into());
-        assert!(!plain.has_serde_derive(plain.whole()));
+        assert_eq!(
+            dto.derives(dto.whole()),
+            ["Debug", "Serialize", "Deserialize"]
+        );
+        let args = Source::new(
+            "/// Docs.\n#[derive(clap::Parser)]\n#[command(about)]\npub struct Args { a: u32 }"
+                .into(),
+        );
+        assert_eq!(args.derives(args.whole()), ["Parser"]);
     }
 }

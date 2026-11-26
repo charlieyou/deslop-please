@@ -47,7 +47,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             continue;
         }
         let type_item = graph.things[thing.index()].item;
-        if model.serde_types.contains(&type_item) {
+        if model.is_serde(type_item) {
             continue;
         }
         let home = graph.things[thing.index()].home;
@@ -170,7 +170,10 @@ mod tests {
             [(Lint::Size(SizeLint::WideStruct), "p::walk::SolveCtx".into())]
         );
 
-        sample.model.serde_types.insert(ctx);
+        sample
+            .model
+            .derives
+            .insert(ctx, vec!["Serialize".to_owned()]);
         assert_eq!(report(&sample), Vec::<(Lint, String)>::new());
     }
 
