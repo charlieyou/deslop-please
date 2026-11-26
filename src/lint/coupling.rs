@@ -115,9 +115,13 @@ fn fan_out(
     callers: Option<&BTreeSet<NodeId>>,
 ) -> Option<Diagnostic> {
     let tree = &model.tree;
-    let layered = tree
+    let layer_limit = tree
         .package_of(module)
         .and_then(|package| model.settings.most_fan_out(&tree.node(package).name));
+    // A hub, which many modules depend on, keeps the default limit: a
+    // layer's looser one is for the modules at its edge.
+    let hub = callers.is_some_and(|callers| callers.len() >= MIN_HUB_DEGREE);
+    let layered = layer_limit.filter(|&most| most < MOST_FAN_OUT || !hub);
     let most = layered.unwrap_or(MOST_FAN_OUT);
     if targets.len() <= most {
         return None;
@@ -126,6 +130,11 @@ fn fan_out(
     let mut notes = vec![format!("depends on: {}", listed(&names(tree, targets)))];
     if layered.is_some() {
         notes.push("held to its layer's limit, which deslop-please.toml sets".to_owned());
+    } else if layer_limit.is_some() {
+        notes.push(format!(
+            "held to the default limit, not its layer's: {} or more modules depend on it",
+            MIN_HUB_DEGREE
+        ));
     }
     if model.settings.high_fan_out.fold_god_hub
         && let Some(callers) = callers

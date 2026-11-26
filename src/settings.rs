@@ -125,7 +125,7 @@ pub struct HighFanOut {
     pub fold_god_hub: bool,
     /// By a crate of `layers`, the most modules one module of its layer or a
     /// layer above may use; the lowest crate's layer that is at or below a
-    /// module's sets its limit.
+    /// module's sets its limit. A hub keeps the default if this is looser.
     pub most_by_layer: BTreeMap<String, usize>,
     /// How a module of another crate counts.
     pub other_crates: Granularity,

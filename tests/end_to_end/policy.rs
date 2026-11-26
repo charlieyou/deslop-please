@@ -322,6 +322,13 @@ fn a_layer_sets_the_fan_out_limit_from_it_up_and_another_crate_counts_by_its_top
     );
     high += &user("h2", numbered("crate::n", 17), "");
     high += &user("h3", numbered("crate::n", 18), "");
+    // `hub` and `edge` each use 16; 10 modules use `hub`, 9 use `edge`.
+    high += &user("hub", numbered("crate::n", 16), "");
+    high += &user("edge", numbered("crate::n", 16), "");
+    for at in 1..=10 {
+        let edge = if at < 10 { " + crate::edge::g()" } else { "" };
+        high += &format!("pub mod c{at} {{ pub fn call() -> u32 {{ crate::hub::g(){edge} }} }}\n");
+    }
     let workspace = scratch_workspace(
         "fan_out_by_layer",
         &[
@@ -350,9 +357,11 @@ fn a_layer_sets_the_fan_out_limit_from_it_up_and_another_crate_counts_by_its_top
     assert_eq!(
         fanned(keys(&workspace)),
         [
+            "high-fan-out high::edge",
             "high-fan-out high::h1",
             "high-fan-out high::h2",
             "high-fan-out high::h3",
+            "high-fan-out high::hub",
             "high-fan-out low::l1",
         ]
     );
@@ -362,9 +371,21 @@ fn a_layer_sets_the_fan_out_limit_from_it_up_and_another_crate_counts_by_its_top
          other-crates = \"top-module\"\n",
     )
     .unwrap();
+    // A hub keeps the default limit of 15 under its layer's looser one.
     assert_eq!(
         fanned(keys(&workspace)),
-        ["high-fan-out high::h3", "high-fan-out low::l1"]
+        [
+            "high-fan-out high::h3",
+            "high-fan-out high::hub",
+            "high-fan-out low::l1"
+        ]
+    );
+    let report = run(&workspace, &[]).stdout;
+    assert!(
+        report.contains(
+            "= note: held to the default limit, not its layer's: 10 or more modules depend on it\n"
+        ),
+        "{report}"
     );
 }
 
