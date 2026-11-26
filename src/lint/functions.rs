@@ -2,11 +2,12 @@
 //! individual functions that cannot be bypassed by inline `#[allow(...)]`.
 
 use super::{
-    Diagnostic, HELD_IN_MIND, HygieneLint, Lint, Picture, SizeLint, in_scope, item_location,
-    without_generics,
+    Diagnostic, HELD_IN_MIND, HygieneLint, Lint, Location, Picture, SizeLint, in_scope,
+    item_location, without_generics,
 };
 use crate::graph::Graph;
-use crate::model::{ItemId, ItemKind, Model, NodeId, PositionalTrap};
+use crate::model::{FunctionMetrics, ItemId, ItemKind, Model, NodeId, PositionalTrap};
+use crate::settings::{Kernel, Traps};
 
 /// The most lines of code, from `fn` to its closing brace, that one non-test
 /// function may hold before it wants splitting.
@@ -18,6 +19,41 @@ const MOST_BRANCHES: usize = 30;
 
 /// The most non-`self` parameters one non-test function may take.
 const MOST_PARAMS: usize = HELD_IN_MIND;
+
+/// The limits one function is held to: the defaults, or a kernel's.
+struct Limits {
+    lines: usize,
+    params: usize,
+    traps: Traps,
+    /// Why they are not the defaults.
+    note: Option<&'static str>,
+}
+
+impl Limits {
+    fn of(kernel: &Kernel, path: Option<&str>) -> Limits {
+        if path.is_some_and(|path| kernel.holds(path)) {
+            Limits {
+                lines: kernel.most_lines.unwrap_or(MOST_LINES),
+                params: kernel.most_params.unwrap_or(MOST_PARAMS),
+                traps: kernel.positional_trap,
+                note: Some("held to the kernel's limits, which deslop-please.toml sets"),
+            }
+        } else {
+            Limits {
+                lines: MOST_LINES,
+                params: MOST_PARAMS,
+                traps: Traps::All,
+                note: None,
+            }
+        }
+    }
+
+    /// `notes`, and why the limits are not the defaults.
+    fn noted(&self, mut notes: Vec<String>) -> Vec<String> {
+        notes.extend(self.note.map(str::to_owned));
+        notes
+    }
+}
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
@@ -42,117 +78,156 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             continue;
         }
         let name = without_generics(&item.name);
-        let key = format!("{}::{name}", tree.display(home));
-        let location = item_location(model, id);
-
-        let lines = metrics.lines as usize;
-        let branches = metrics.branches as usize;
-        if lines > MOST_LINES || branches > MOST_BRANCHES {
-            let (label, length, most, message) = if lines > MOST_LINES {
-                (
-                    "lines",
-                    lines,
-                    MOST_LINES,
-                    format!(
-                        "`{name}` is long: {lines} lines ({branches} branches), more than {MOST_LINES} lines"
-                    ),
-                )
-            } else {
-                (
-                    "branches",
-                    branches,
-                    MOST_BRANCHES,
-                    format!(
-                        "`{name}` is complex: {branches} branches ({lines} lines), more than {MOST_BRANCHES} branches"
-                    ),
-                )
-            };
-            diagnostics.push(Diagnostic {
-                lint: Lint::Size(SizeLint::LongFunction),
-                key: key.clone(),
-                message,
-                location: location.clone(),
-                notes: vec![format!("{lines} lines, {branches} branches")],
-                picture: Picture::Bar {
-                    label: label.to_owned(),
-                    length,
-                    most,
-                },
-            });
+        let found = Found {
+            key: format!("{}::{name}", tree.display(home)),
+            location: item_location(model, id),
+            limits: Limits::of(
+                &model.settings.kernel,
+                item.file
+                    .map(|file| model.files[file.index()].path.as_str()),
+            ),
+            name,
+        };
+        diagnostics.extend(long(&found, &metrics));
+        if item.trait_impl || item.extern_abi {
+            continue;
         }
-
-        let params = metrics.params as usize;
-        if !item.trait_impl && !item.extern_abi && params > MOST_PARAMS {
-            diagnostics.push(Diagnostic {
-                lint: Lint::Size(SizeLint::WideSignature),
-                key: key.clone(),
-                message: format!("`{name}` takes {params} parameters, more than {MOST_PARAMS}"),
-                location: location.clone(),
-                notes: vec!["group related parameters into a cohesive struct".to_owned()],
-                picture: Picture::Bar {
-                    label: "params".to_owned(),
-                    length: params,
-                    most: MOST_PARAMS,
-                },
-            });
-        }
-
-        if !item.trait_impl
-            && !item.extern_abi
-            && let Some(trap) = metrics.positional_trap
-        {
-            let (message, note, label, length, most) = match trap {
-                PositionalTrap::Booleans(count) => (
-                    format!("`{name}` takes {count} `bool` parameters (positional flag trap)"),
-                    "replace boolean flags with named enums or an options struct".to_owned(),
-                    "bools",
-                    count as usize,
-                    1usize,
-                ),
-                PositionalTrap::RepeatedPrimitive { count, kind } => (
-                    format!("`{name}` takes {count} consecutive `{kind}` parameters"),
-                    format!("group adjacent `{kind}` parameters into a named struct or newtypes"),
-                    kind,
-                    count as usize,
-                    3usize,
-                ),
-            };
-            diagnostics.push(Diagnostic {
-                lint: Lint::Size(SizeLint::PositionalTrap),
-                key: key.clone(),
-                message,
-                location: location.clone(),
-                notes: vec![note],
-                picture: Picture::Bar {
-                    label: label.to_owned(),
-                    length,
-                    most,
-                },
-            });
-        }
-
-        if !item.trait_impl && !item.extern_abi && metrics.returns_string_error {
-            diagnostics.push(Diagnostic {
-                lint: Lint::Hygiene(HygieneLint::StringError),
-                key: key.clone(),
-                message: format!("`{name}` returns a stringly-typed `Result<_, String>`"),
-                location,
-                notes: vec!["return a typed error enum instead of `String`".to_owned()],
-                picture: Picture::Arrow {
-                    from: key,
-                    to: "Result<_, String>".to_owned(),
-                    detail: "use a typed error enum".to_owned(),
-                },
-            });
+        diagnostics.extend(wide(&found, &metrics));
+        diagnostics.extend(trap(&found, &metrics));
+        if metrics.returns_string_error {
+            diagnostics.push(string_error(&found));
         }
     }
     diagnostics
 }
 
+/// A function that may be reported: how it is reported, and its limits.
+struct Found {
+    name: String,
+    key: String,
+    location: Option<Location>,
+    limits: Limits,
+}
+
+fn long(found: &Found, metrics: &FunctionMetrics) -> Option<Diagnostic> {
+    let Found { name, limits, .. } = found;
+    let lines = metrics.lines as usize;
+    let branches = metrics.branches as usize;
+    let (label, length, most, message) = if lines > limits.lines {
+        (
+            "lines",
+            lines,
+            limits.lines,
+            format!(
+                "`{name}` is long: {lines} lines ({branches} branches), more than {} lines",
+                limits.lines
+            ),
+        )
+    } else if branches > MOST_BRANCHES {
+        (
+            "branches",
+            branches,
+            MOST_BRANCHES,
+            format!(
+                "`{name}` is complex: {branches} branches ({lines} lines), more than {MOST_BRANCHES} branches"
+            ),
+        )
+    } else {
+        return None;
+    };
+    Some(Diagnostic {
+        lint: Lint::Size(SizeLint::LongFunction),
+        key: found.key.clone(),
+        message,
+        location: found.location.clone(),
+        notes: limits.noted(vec![format!("{lines} lines, {branches} branches")]),
+        picture: Picture::Bar {
+            label: label.to_owned(),
+            length,
+            most,
+        },
+    })
+}
+
+fn wide(found: &Found, metrics: &FunctionMetrics) -> Option<Diagnostic> {
+    let Found { name, limits, .. } = found;
+    let params = metrics.params as usize;
+    (params > limits.params).then(|| Diagnostic {
+        lint: Lint::Size(SizeLint::WideSignature),
+        key: found.key.clone(),
+        message: format!(
+            "`{name}` takes {params} parameters, more than {}",
+            limits.params
+        ),
+        location: found.location.clone(),
+        notes: limits.noted(vec![
+            "group related parameters into a cohesive struct".to_owned(),
+        ]),
+        picture: Picture::Bar {
+            label: "params".to_owned(),
+            length: params,
+            most: limits.params,
+        },
+    })
+}
+
+fn trap(found: &Found, metrics: &FunctionMetrics) -> Option<Diagnostic> {
+    let name = &found.name;
+    let (message, note, label, length, most) = match metrics.positional_trap? {
+        PositionalTrap::Booleans(count) => (
+            format!("`{name}` takes {count} `bool` parameters (positional flag trap)"),
+            "replace boolean flags with named enums or an options struct".to_owned(),
+            "bools",
+            count as usize,
+            1usize,
+        ),
+        PositionalTrap::RepeatedPrimitive { .. } if found.limits.traps == Traps::Bools => {
+            return None;
+        }
+        PositionalTrap::RepeatedPrimitive { count, kind } => (
+            format!("`{name}` takes {count} consecutive `{kind}` parameters"),
+            format!("group adjacent `{kind}` parameters into a named struct or newtypes"),
+            kind,
+            count as usize,
+            3usize,
+        ),
+    };
+    Some(Diagnostic {
+        lint: Lint::Size(SizeLint::PositionalTrap),
+        key: found.key.clone(),
+        message,
+        location: found.location.clone(),
+        notes: vec![note],
+        picture: Picture::Bar {
+            label: label.to_owned(),
+            length,
+            most,
+        },
+    })
+}
+
+fn string_error(found: &Found) -> Diagnostic {
+    Diagnostic {
+        lint: Lint::Hygiene(HygieneLint::StringError),
+        key: found.key.clone(),
+        message: format!(
+            "`{}` returns a stringly-typed `Result<_, String>`",
+            found.name
+        ),
+        location: found.location.clone(),
+        notes: vec!["return a typed error enum instead of `String`".to_owned()],
+        picture: Picture::Arrow {
+            from: found.key.clone(),
+            to: "Result<_, String>".to_owned(),
+            detail: "use a typed error enum".to_owned(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FunctionMetrics, tests::Sample};
+    use crate::model::tests::Sample;
 
     fn report(sample: &Sample) -> Vec<(Lint, String)> {
         let graph = Graph::new(&sample.model);

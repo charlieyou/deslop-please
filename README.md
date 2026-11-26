@@ -60,6 +60,18 @@ layers = [
 # Each is indexed too (for the host, with default features), and what its
 # code uses counts as a use from another crate, its tests' as a test's.
 consumers = ["crates/gpu", "../app/crates/app-solver"]
+
+# Hot code that numeric work makes wide and long, held to finite limits of
+# its own: no lint is off for it. A path, relative to the workspace's root,
+# names a file or a directory, and its last segment names `<segment>.rs`
+# too; a `*` stands for any characters in a segment. A limit left out keeps
+# its default.
+[kernel]
+paths = ["crates/simd/src/kernel", "crates/core/src/regret_*"]
+most-params = 14       # wide-signature; default 7
+most-lines = 300       # long-function, in code lines; default 150
+most-file-lines = 6000 # long-file; default 2000
+positional-trap = "bools" # report bool flags only, not runs of numbers; default "all"
 ```
 
 ### Add to your `AGENTS.md`

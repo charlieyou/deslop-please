@@ -22,11 +22,17 @@ const MOST_LINES: usize = 2_000;
 
 pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let concerned = |file: &File| in_scope(&model.tree, scope, file.module);
+    let kernel = &model.settings.kernel;
     let mut diagnostics: Vec<Diagnostic> = model
         .files
         .iter()
-        .filter(|file| file.lines > MOST_LINES && concerned(file))
-        .map(long_file)
+        .filter_map(|file| {
+            let most = match kernel.most_file_lines {
+                Some(most) if kernel.holds(&file.path) => most,
+                _ => MOST_LINES,
+            };
+            (file.lines > most && concerned(file)).then(|| long_file(file, most))
+        })
         .collect();
     // By directory, its members, and whether a file below it is in scope.
     let mut directories: BTreeMap<&str, (BTreeSet<&str>, bool)> = BTreeMap::new();
@@ -62,12 +68,12 @@ fn holders(path: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
-fn long_file(file: &File) -> Diagnostic {
+fn long_file(file: &File, most: usize) -> Diagnostic {
     Diagnostic {
         lint: Lint::Size(super::SizeLint::LongFile),
         key: file.path.clone(),
         message: format!(
-            "`{}` is long: it has {} lines, more than {MOST_LINES}",
+            "`{}` is long: it has {} lines, more than {most}",
             file.path, file.lines
         ),
         location: Some(Location {
@@ -78,7 +84,7 @@ fn long_file(file: &File) -> Diagnostic {
         picture: Picture::Bar {
             label: "lines".to_owned(),
             length: file.lines,
-            most: MOST_LINES,
+            most,
         },
     }
 }

@@ -1816,3 +1816,99 @@ fn a_type_is_wide_by_what_code_outside_its_module_uses_and_a_submodule_is_outsid
         .collect();
     assert_eq!(found, ["wide-type wide::store::Open"]);
 }
+
+#[test]
+fn kernel_paths_are_held_to_finite_limits_of_their_own_and_only_when_configured() {
+    let params = |name: &str, count: usize| -> String {
+        let list: Vec<String> = (0..count).map(|at| format!("p{at}: Vec<u8>")).collect();
+        let sum: Vec<String> = (0..count).map(|at| format!("p{at}.len()")).collect();
+        format!(
+            "pub fn {name}({}) -> usize {{ {} }}\n",
+            list.join(", "),
+            sum.join(" + ")
+        )
+    };
+    let long = |name: &str, lines: usize| -> String {
+        let body: String = (0..lines - 2)
+            .map(|at| format!("    let _v{at} = {at};\n"))
+            .collect();
+        format!("pub fn {name}() {{\n{body}}}\n")
+    };
+    let traps = "pub fn numbers(a: u32, b: u32, c: u32, d: u32) -> u32 { a + b * c - d }\n\
+                 pub fn flags(a: bool, b: bool) -> bool { a && !b }\n";
+    let padding =
+        |lines: usize| -> String { (0..lines).map(|at| format!("// Line {at}.\n")).collect() };
+    // The same code in the kernel, and in a file whose name only starts
+    // like it.
+    let code = format!(
+        "{}{}{}{}{traps}",
+        params("nine", 9),
+        params("ten", 10),
+        long("lines_160", 160),
+        long("lines_161", 161),
+    );
+    let lib = "//! Kernels.\npub mod kernel;\npub mod kernels;\n";
+    let workspace = scratch_workspace(
+        "kernel_limits",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"hot\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+            ("src/kernel/mod.rs", &format!("pub mod table;\n{code}")),
+            ("src/kernel/table.rs", &padding(2_050)),
+            ("src/kernels.rs", &format!("{code}{}", padding(2_050))),
+        ],
+    );
+    let sized = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| {
+                [
+                    "long-function",
+                    "wide-signature",
+                    "positional-trap",
+                    "long-file",
+                ]
+                .iter()
+                .any(|lint| key.starts_with(&format!("{lint} ")))
+            })
+            .collect()
+    };
+    let everywhere = |path: &str| -> Vec<String> {
+        let mut found = vec![
+            format!("long-function hot::{path}::lines_160"),
+            format!("long-function hot::{path}::lines_161"),
+            format!("positional-trap hot::{path}::flags"),
+            format!("positional-trap hot::{path}::numbers"),
+            format!("wide-signature hot::{path}::nine"),
+            format!("wide-signature hot::{path}::ten"),
+        ];
+        found.sort();
+        found
+    };
+    let mut strict = vec![
+        "long-file src/kernel/table.rs".to_owned(),
+        "long-file src/kernels.rs".to_owned(),
+    ];
+    strict.extend(everywhere("kernel"));
+    strict.extend(everywhere("kernels"));
+    strict.sort();
+    assert_eq!(sized(keys(&workspace)), strict);
+
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[kernel]\npaths = [\"src/kern*l\"]\nmost-params = 9\nmost-lines = 160\n\
+         most-file-lines = 2100\npositional-trap = \"bools\"\n",
+    )
+    .unwrap();
+    let mut relaxed = vec![
+        "long-file src/kernels.rs".to_owned(),
+        "long-function hot::kernel::lines_161".to_owned(),
+        "positional-trap hot::kernel::flags".to_owned(),
+        "wide-signature hot::kernel::ten".to_owned(),
+    ];
+    relaxed.extend(everywhere("kernels"));
+    relaxed.sort();
+    assert_eq!(sized(keys(&workspace)), relaxed);
+}
