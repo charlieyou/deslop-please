@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
-    Diagnostic, HELD_IN_MIND, Lint, Picture, SurfaceLint, counted, in_scope, item_location,
-    module_location, without_generics,
+    Diagnostic, HELD_IN_MIND, Lint, Location, Picture, SurfaceLint, clickable, counted, in_scope,
+    item_location, listed, module_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
 use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility};
@@ -55,9 +55,137 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         })
         .collect();
 
+    let pins = pins(model, graph, &candidates, &tables);
     let mut diagnostics = check_modules(model, &candidates, &tables, scope);
-    diagnostics.extend(check_items(model, graph, &candidates, &tables, scope));
+    diagnostics.extend(check_items(
+        model,
+        graph,
+        &candidates,
+        &tables,
+        &pins,
+        scope,
+    ));
     diagnostics
+}
+
+/// What rustc does not let narrow alone. An item that a signature writes,
+/// a function's or the type of a field, cannot be less visible than the
+/// item it is written for (`private_interfaces`): while that item stays
+/// `pub`, so must it.
+#[derive(Default)]
+struct Pins {
+    /// Over-scoped items that a signature of an item keeping its
+    /// visibility pins where they are.
+    kept: HashSet<ItemId>,
+    /// By an item reported, the over-scoped items its signature pins, which
+    /// narrowing it lets narrow too.
+    chains: HashMap<ItemId, Vec<ItemId>>,
+    chained: HashSet<ItemId>,
+}
+
+fn pins(
+    model: &Model,
+    graph: &Graph,
+    candidates: &[(ItemId, NodeId)],
+    tables: &UsageTables,
+) -> Pins {
+    let over: HashSet<ItemId> = candidates
+        .iter()
+        .filter(|&&(id, _)| {
+            usage_for(model, graph, id, &tables.item_usage, &tables.thing_usage)
+                .is_some_and(|usage| is_over_scoped(model, id, usage))
+        })
+        .map(|&(id, _)| id)
+        .collect();
+    // By over-scoped item, the items whose signatures write it, as visible.
+    let mut pinners: HashMap<ItemId, Vec<ItemId>> = HashMap::new();
+    for reference in &model.references {
+        let item = reference.item;
+        if let Some(holder) = reference.holder
+            && reference.in_signature
+            && !reference.test
+            && holder != item
+            && model.items[item.index()].kind == ItemKind::Type
+            && over.contains(&item)
+            && effective_visibility(model, holder) >= model.items[item.index()].visibility
+        {
+            pinners.entry(item).or_default().push(holder);
+        }
+    }
+    // The topmost item of `holder`'s, it or a type it is written for, that
+    // is over-scoped and not kept: the one whose report covers it.
+    let unkept = |kept: &HashSet<ItemId>, holder: ItemId| {
+        std::iter::successors(Some(holder), |&at| model.items[at.index()].parent)
+            .filter(|at| over.contains(at) && !kept.contains(at))
+            .last()
+    };
+    let mut kept = HashSet::new();
+    loop {
+        let newly: Vec<ItemId> = pinners
+            .iter()
+            .filter(|(item, holders)| {
+                !kept.contains(*item)
+                    && holders
+                        .iter()
+                        .any(|&holder| unkept(&kept, holder).is_none())
+            })
+            .map(|(&item, _)| item)
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        kept.extend(newly);
+    }
+    // An over-scoped item that a signature pins reports with the root of
+    // its chain of pinners, when it has one apart from itself and its type.
+    let next = |item: ItemId| {
+        let parent = model.items[item.index()].parent;
+        pinners
+            .get(&item)?
+            .iter()
+            .filter_map(|&holder| unkept(&kept, holder))
+            .find(|&root| root != item && Some(root) != parent)
+    };
+    let mut pins = Pins::default();
+    let mut pinned: Vec<ItemId> = pinners.keys().copied().collect();
+    pinned.sort();
+    for item in pinned.into_iter().filter(|item| !kept.contains(item)) {
+        let mut path = vec![item];
+        let mut at = item;
+        while let Some(pinner) = next(at) {
+            if let Some(start) = path.iter().position(|&seen| seen == pinner) {
+                // Items that pin each other report once, with the first.
+                let first = path[start..].iter().min().copied();
+                path.extend(first);
+                break;
+            }
+            path.push(pinner);
+            at = pinner;
+        }
+        let root = path.last().copied().filter(|&root| root != item);
+        if let Some(root) = root {
+            pins.chained.insert(item);
+            pins.chains.entry(root).or_default().push(item);
+        }
+    }
+    pins.kept = kept;
+    pins
+}
+
+/// The visibility that `item` has where it is named: its own, or less, that
+/// of a type it is written for. An enum's variants, and their fields, are as
+/// visible as the enum.
+fn effective_visibility(model: &Model, item: ItemId) -> Visibility {
+    let in_variant = |at: ItemId| {
+        std::iter::successors(Some(at), |&at| model.items[at.index()].parent)
+            .take(2)
+            .any(|at| model.items[at.index()].kind == ItemKind::Variant)
+    };
+    std::iter::successors(Some(item), |&at| model.items[at.index()].parent)
+        .filter(|&at| !in_variant(at))
+        .map(|at| model.items[at.index()].visibility)
+        .min()
+        .unwrap_or_default()
 }
 
 fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
@@ -157,11 +285,46 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
         }
     }
 
+    record_struct_updates(model, graph, &mut item_usage);
     UsageTables {
         item_usage,
         thing_usage,
         mod_usage,
         non_empty_mods,
+    }
+}
+
+/// Records a use of each field of a type that a struct literal with a base,
+/// `T { a, ..base }`, moves: rustc wants every one visible there (E0451).
+fn record_struct_updates(model: &Model, graph: &Graph, item_usage: &mut [Usage]) {
+    let tree = &model.tree;
+    let mut fields: HashMap<ItemId, Vec<ItemId>> = HashMap::new();
+    for (index, item) in model.items.iter().enumerate() {
+        if item.kind == ItemKind::Field
+            && let Some(parent) = item.parent
+        {
+            fields.entry(parent).or_default().push(ItemId::new(index));
+        }
+    }
+    for reference in model.references.iter().filter(|r| r.struct_update) {
+        let ty = &model.items[reference.item.index()];
+        let ref_file = &model.files[reference.file.index()];
+        let pkg = tree.package_of(ty.owner);
+        let same_target = tree.package_of(ref_file.module) == pkg
+            && ref_file.target == ty.file.and_then(|f| model.files[f.index()].target);
+        for &field in fields.get(&reference.item).into_iter().flatten() {
+            let home = home_of(model, graph, field);
+            record(
+                &mut item_usage[field.index()],
+                AccessSite {
+                    test: reference.test,
+                    external: tree.package_of(ref_file.module) != pkg
+                        || ref_file.target != Some(TargetKind::Library),
+                    outside_home: !same_target || is_outside_home(tree, reference.from, home, pkg),
+                    from: reference.from,
+                },
+            );
+        }
     }
 }
 
@@ -216,19 +379,22 @@ fn check_items(
     graph: &Graph,
     candidates: &[(ItemId, NodeId)],
     tables: &UsageTables,
+    pins: &Pins,
     scope: Option<NodeId>,
 ) -> Vec<Diagnostic> {
     let mut suppressed_parents: HashSet<ItemId> = HashSet::new();
     let mut diagnostics = Vec::new();
     for &(id, pkg) in candidates {
-        if model.items[id.index()].kind != ItemKind::Type {
+        if model.items[id.index()].kind != ItemKind::Type || pins.kept.contains(&id) {
             continue;
         }
         let Some(usage) = usage_for(model, graph, id, &tables.item_usage, &tables.thing_usage)
         else {
             continue;
         };
-        if let Some(diag) = classify(model, graph, id, pkg, usage, scope) {
+        if pins.chained.contains(&id) {
+            suppressed_parents.insert(id);
+        } else if let Some(diag) = classify(model, graph, id, pkg, usage, pins, scope) {
             suppressed_parents.insert(id);
             diagnostics.push(diag);
         } else if is_over_scoped(model, id, usage) {
@@ -238,7 +404,10 @@ fn check_items(
 
     for &(id, pkg) in candidates {
         let item = &model.items[id.index()];
-        if matches!(item.kind, ItemKind::Type | ItemKind::Module) {
+        if matches!(item.kind, ItemKind::Type | ItemKind::Module)
+            || pins.kept.contains(&id)
+            || pins.chained.contains(&id)
+        {
             continue;
         }
         if item
@@ -251,7 +420,7 @@ fn check_items(
         else {
             continue;
         };
-        if let Some(diag) = classify(model, graph, id, pkg, usage, scope) {
+        if let Some(diag) = classify(model, graph, id, pkg, usage, pins, scope) {
             diagnostics.push(diag);
         }
     }
@@ -290,6 +459,7 @@ fn classify(
     id: ItemId,
     pkg: NodeId,
     usage: &Usage,
+    pins: &Pins,
     scope: Option<NodeId>,
 ) -> Option<Diagnostic> {
     if !is_over_scoped(model, id, usage) {
@@ -298,7 +468,39 @@ fn classify(
     if !in_scope(&model.tree, scope, home_of(model, graph, id)) {
         return None;
     }
-    Some(build_diagnostic(model, graph, id, pkg, usage))
+    let mut diagnostic = build_diagnostic(model, graph, id, pkg, usage);
+    if let Some(chain) = pins.chains.get(&id) {
+        let mut names: Vec<String> = chain
+            .iter()
+            .map(|&pinned| {
+                let home = model.tree.display(home_of(model, graph, pinned));
+                format!(
+                    "{home}::{}",
+                    without_generics(&model.items[pinned.index()].name)
+                )
+            })
+            .collect();
+        names.sort();
+        diagnostic.notes.push(format!(
+            "its signature pins {}, which can narrow with it: {}",
+            counted(names.len(), "item"),
+            listed(&names)
+        ));
+    }
+    if model.items[id.index()].visibility == Visibility::Pub
+        && let Some(reexport) = model.reexports.iter().find(|r| r.item == id)
+    {
+        let at = Location {
+            file: model.files[reexport.file.index()].path.clone(),
+            line: reexport.line,
+        };
+        diagnostic.notes.push(format!(
+            "{}: a `pub use` re-exports it; narrow or remove that too",
+            clickable(&at)
+        ));
+        diagnostic.location = Some(at);
+    }
+    Some(diagnostic)
 }
 
 fn record(usage: &mut Usage, site: AccessSite) {

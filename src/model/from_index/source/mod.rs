@@ -15,7 +15,7 @@ pub use uses::{Access, Plain};
 
 use std::collections::HashSet;
 
-use crate::model::FunctionMetrics;
+use crate::model::{FunctionMetrics, ItemKind};
 use crate::scip::{Position, Range};
 use tokens::{Kind, Token};
 
@@ -77,6 +77,15 @@ pub struct ImplBlock {
     /// For a trait `impl`, the name of the trait before `for`: `Display` in
     /// `impl fmt::Display for &Ready`. `None` for an inherent `impl`.
     pub trait_type: Option<Range>,
+}
+
+/// How a reference is written, as [`Source::written`] reads it.
+pub struct Written {
+    /// In its holder's signature: before a function's body or a
+    /// constant's value, or anywhere in another item's definition.
+    pub in_signature: bool,
+    /// It names the type of a struct literal with a base: `T { a, ..base }`.
+    pub struct_update: bool,
 }
 
 /// What a function's text says about it.
@@ -160,6 +169,96 @@ impl Source {
             pub_uses,
             idents,
         }
+    }
+
+    /// How the name at `name` is written, inside the definition `holder` of
+    /// an item of its kind, if it is.
+    pub fn written(&self, name: Range, holder: Option<(Range, ItemKind)>) -> Written {
+        Written {
+            in_signature: holder
+                .is_some_and(|(holder, kind)| self.in_signature(holder, kind, name)),
+            struct_update: self.struct_update(name),
+        }
+    }
+
+    /// Whether the name at `name` writes a struct literal with a base:
+    /// `T { a: 1, ..base }`, `m::T::<u8> { ..base }`, but not the pattern
+    /// `T { a, .. }`.
+    fn struct_update(&self, name: Range) -> bool {
+        let tokens = &self.tokens;
+        let Some(offset) = self.offset(name.start) else {
+            return false;
+        };
+        let mut at = tokens.partition_point(|token| token.start < offset) + 1;
+        if tokens.get(at).is_some_and(|t| self.is(*t, "::"))
+            && tokens.get(at + 1).is_some_and(|t| self.is(*t, "<"))
+        {
+            at = self.past_angles(at + 1).unwrap_or(tokens.len());
+        }
+        if !tokens.get(at).is_some_and(|t| self.is(*t, "{")) {
+            return false;
+        }
+        let Some(close) = self.matching(at) else {
+            return false;
+        };
+        let mut depth = 0;
+        (at + 1..close).any(|index| {
+            match tokens[index].kind {
+                Kind::Open => depth += 1,
+                Kind::Close => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+                && self.is(tokens[index], "..")
+                && [",", "{"].contains(&self.text(tokens[index - 1]))
+                && index + 1 < close
+        })
+    }
+
+    /// Whether `at`, inside the definition `holder` of an item of `kind`, is
+    /// in its signature: before a function's body or a constant's value.
+    fn in_signature(&self, holder: Range, kind: ItemKind, at: Range) -> bool {
+        let Some(tokens) = self.tokens_in(holder) else {
+            return false;
+        };
+        let end = match kind {
+            ItemKind::Function => {
+                if !tokens.last().is_some_and(|t| self.is(*t, "}")) {
+                    return true;
+                }
+                let close = tokens.len() - 1;
+                let mut depth = 0;
+                let open = (0..=close).rev().find(|&at| {
+                    match tokens[at].kind {
+                        Kind::Close => depth += 1,
+                        Kind::Open => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                });
+                match open {
+                    Some(open) => tokens[open].start,
+                    None => return true,
+                }
+            }
+            ItemKind::Constant => {
+                let mut depth = 0;
+                let equals = tokens.iter().find(|token| {
+                    match token.kind {
+                        Kind::Open => depth += 1,
+                        Kind::Close => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0 && self.is(**token, "=")
+                });
+                match equals {
+                    Some(equals) => equals.start,
+                    None => return true,
+                }
+            }
+            _ => return true,
+        };
+        at.start < self.position(end)
     }
 
     /// Every `impl` block, in order.

@@ -1276,3 +1276,83 @@ fn a_traits_items_take_its_visibility_and_are_not_narrowed_on_their_own() {
     // only `side` can be narrowed.
     assert_eq!(keys(&workspace), ["over-public core_t::Square::side"]);
 }
+
+#[test]
+fn what_a_kept_signature_names_stays_pub_and_a_narrowable_one_reports_at_its_root() {
+    let lib = "\
+pub struct Config { level: u32 }
+pub struct Scratch(u32);
+pub fn load() -> Config { let scratch = Scratch(2); Config { level: scratch.0 } }
+pub fn level(config: &Config) -> u32 { config.level + helper(&Detail(1)) }
+pub struct Detail(u32);
+pub fn helper(detail: &Detail) -> u32 { detail.0 }
+#[derive(Default)]
+pub struct Opts { pub a: u32, pub b: u32 }
+pub fn sum(opts: &Opts) -> u32 { opts.a + opts.b }
+pub struct Pair { pub x: u32, pub y: u32 }
+pub fn pair() -> Pair { Pair { x: 1, y: 2 } }
+mod inner {
+    pub struct Hidden;
+    impl Hidden { pub fn get(&self) -> u32 { 3 } }
+}
+pub use inner::Hidden;
+pub fn hidden() -> u32 { Hidden.get() + depth(&Tree { leaf: None }) }
+pub const N: usize = 2; pub fn buffer() -> [u8; N] { [0; N] }
+pub struct Tree { pub leaf: Option<Box<Leaf>> } pub struct Leaf { pub tree: Option<Box<Tree>> } fn depth(tree: &Tree) -> u32 { tree.leaf.as_ref().map_or(0, |leaf| leaf.tree.as_ref().map_or(1, |tree| 1 + depth(tree))) }
+pub enum Shape { Round(Bark) } pub struct Bark(pub u32); pub fn shape() -> Shape { Shape::Round(Bark(1)) }
+";
+    let main = "\
+fn main() {
+    let opts = core_t::Opts { a: 1, ..Default::default() };
+    let core_t::Pair { x, .. } = core_t::pair();
+    let _ = core_t::level(&core_t::load()) + core_t::sum(&opts) + x + core_t::hidden();
+    let _ = (core_t::buffer(), core_t::shape());
+}
+";
+    let workspace = private_pair("pinned", lib, main, &[]);
+    // `Config` stays as `pub` as `load`, which `app` calls, and `Detail`
+    // narrows with `helper`; `Scratch` is only in a body, and the pattern
+    // `Pair { x, .. }` moves no field, as `..Default::default()` moves `b`.
+    // A const pins nothing; of `Tree` and `Leaf` one reports; a variant pins `Bark`.
+    assert_eq!(
+        keys(&workspace),
+        [
+            "over-public core_t::N",
+            "over-public core_t::Pair::y",
+            "over-public core_t::Scratch",
+            "over-public core_t::Tree",
+            "over-public core_t::helper",
+            "over-public core_t::inner::Hidden",
+        ]
+    );
+    let report = run(&workspace, &[]).stdout;
+    assert!(
+        report.contains(
+            "error[over-public]: `helper` is `pub` but only used inside `core_t` (1 use in 1 module)\n\
+             \x20 --> core/src/lib.rs:6:1\n\
+             \x20 = note: no external crate, binary, example, or integration test references `helper`\n\
+             \x20 = note: its signature pins 1 item, which can narrow with it: core_t::Detail\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "= note: its signature pins 1 item, which can narrow with it: core_t::Leaf\n"
+        ),
+        "{report}"
+    );
+    // `Hidden` narrows once the `pub use` does.
+    assert!(
+        report.contains(
+            "error[over-public]: `Hidden` is `pub` but only used inside `core_t` (3 uses in 2 modules)\n\
+             \x20 --> core/src/lib.rs:16:1\n"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "= note: core/src/lib.rs:16:1: a `pub use` re-exports it; narrow or remove that too\n"
+        ),
+        "{report}"
+    );
+}

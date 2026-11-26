@@ -28,11 +28,16 @@ impl<T: Copy> Blocks<T> {
 
     /// The smallest block around `range`, other than `range` itself.
     pub fn innermost(&self, range: Range) -> Option<T> {
+        self.innermost_block(range).map(|(_, item)| item)
+    }
+
+    /// The same, with the block.
+    pub fn innermost_block(&self, range: Range) -> Option<(Range, T)> {
         self.blocks
             .iter()
             .filter(|(block, _)| *block != range && block.holds(range))
             .min_by_key(|(block, _)| (lines(*block), Reverse(block.start)))
-            .map(|&(_, item)| item)
+            .copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Range, T)> + '_ {

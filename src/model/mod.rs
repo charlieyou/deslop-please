@@ -24,6 +24,8 @@ pub struct Model {
     pub references: Vec<Reference>,
     /// What each wrapper hands on. No chain of forwarders loops.
     pub wrappers: HashMap<ItemId, Wrapper>,
+    /// Each item a plain `pub use` names, other than a module, where it does.
+    pub reexports: Vec<Reexport>,
     /// `pub use <path>::*;` and `pub(...) use <path>::*;` glob re-exports.
     pub glob_reexports: Vec<GlobReexport>,
     /// Per-module count of `pub use` / `pub(...) use` declarations.
@@ -87,6 +89,14 @@ pub enum Visibility {
     Restricted,
     /// Plain `pub`.
     Pub,
+}
+
+/// An item that a plain `pub use` declaration names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reexport {
+    pub item: ItemId,
+    pub file: FileId,
+    pub line: u32,
 }
 
 /// A `pub use <path>::*;` or `pub(...) use <path>::*;` declaration written in a module.
@@ -212,6 +222,13 @@ pub struct Reference {
     /// mutating method on it (not a plain read, shared borrow, or read index).
     pub mutates: bool,
     pub test: bool,
+    /// Its holder's signature writes it: a function's parameters, return
+    /// type, generics or bounds, the type of a field or constant, a type's
+    /// own definition. Whoever can name the holder must be able to name it.
+    pub in_signature: bool,
+    /// It names a type in a struct literal with a base, `T { a, ..base }`,
+    /// which moves every field it does not write: each must be visible there.
+    pub struct_update: bool,
 }
 
 /// A function that adds nothing of its own.
@@ -359,6 +376,8 @@ pub mod tests {
                 copies: false,
                 mutates: false,
                 test: false,
+                in_signature: false,
+                struct_update: false,
             });
         }
 

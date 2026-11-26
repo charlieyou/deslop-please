@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::Error;
 use crate::model::{
     CrateDep, File, FileId, GlobReexport, Item, ItemId, ItemKind, Model, ModuleReexports, NodeId,
-    NodeKind, Reference, TraitImpl, Tree, Visibility, Wrapper,
+    NodeKind, Reexport, Reference, TraitImpl, Tree, Visibility, Wrapper,
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
@@ -40,9 +40,8 @@ struct Builder<'a> {
     references: Vec<Reference>,
     glob_reexports: Vec<GlobReexport>,
     module_reexports: Vec<ModuleReexports>,
-    /// By the place of each reference in `references`: what its code does
-    /// with what it names.
-    accesses: Vec<Access>,
+    /// By the place of each reference in `references`: where it is written.
+    sites: Vec<Site>,
     packages: HashMap<(&'a str, &'a str), NodeId>,
     /// The package of each target's root file.
     target_roots: HashMap<&'a str, NodeId>,
@@ -66,6 +65,14 @@ enum Named {
     Outside(Kind),
 }
 
+/// Where a reference is written, and what its code does with what it names.
+struct Site {
+    access: Access,
+    range: Range,
+    /// The whole definition of its holder.
+    holder: Option<Range>,
+}
+
 struct Unit<'a> {
     file: FileId,
     document: &'a Document<'a>,
@@ -82,6 +89,8 @@ struct Unit<'a> {
     scip_packages: HashSet<String>,
     /// Distinct identifier tokens appearing in this file.
     idents: HashSet<String>,
+    /// What its plain `pub use` declarations name.
+    reexports: Vec<Reexport>,
 }
 
 impl<'a> Builder<'a> {
@@ -94,7 +103,7 @@ impl<'a> Builder<'a> {
             references: Vec::new(),
             glob_reexports: Vec::new(),
             module_reexports: Vec::new(),
-            accesses: Vec::new(),
+            sites: Vec::new(),
             packages: HashMap::new(),
             target_roots: HashMap::new(),
             symbols: HashMap::new(),
@@ -110,6 +119,7 @@ impl<'a> Builder<'a> {
     /// The model, once every document is in.
     fn finish(mut self, index: &Index) -> Model {
         let traits = self.read_symbol_information(index);
+        self.mark_signatures();
         self.mark_test_code();
         self.place_in_types();
         self.mark_function_info();
@@ -125,6 +135,11 @@ impl<'a> Builder<'a> {
             files: self.files,
             items: self.items,
             references: self.references,
+            reexports: self
+                .units
+                .iter()
+                .flat_map(|unit| unit.reexports.clone())
+                .collect(),
             wrappers,
             glob_reexports: self.glob_reexports,
             module_reexports: self.module_reexports,
@@ -240,6 +255,7 @@ impl<'a> Builder<'a> {
             declared_modules,
             scip_packages: HashSet::new(),
             idents: HashSet::new(),
+            reexports: Vec::new(),
         };
         let scan = unit.source.scan_file();
         let mut scip_packages = HashSet::new();
@@ -251,14 +267,17 @@ impl<'a> Builder<'a> {
             }
             self.add_definition_or_reference(occurrence, &unit, module, &scan.imports)?;
         }
-        self.add_reexports(&unit, module, &scan.pub_uses);
+        unit.reexports = self.add_reexports(&unit, module, &scan.pub_uses);
         unit.scip_packages = scip_packages;
         unit.idents = scan.idents;
         self.units.push(unit);
         Ok(())
     }
 
-    fn add_reexports(&mut self, unit: &Unit, module: NodeId, pub_uses: &[PubUse]) {
+    /// Records the unit's re-exports, and returns what its plain `pub use`
+    /// declarations name.
+    fn add_reexports(&mut self, unit: &Unit, module: NodeId, pub_uses: &[PubUse]) -> Vec<Reexport> {
+        let mut reexports = Vec::new();
         let mut per_module: HashMap<NodeId, (u32, usize)> = HashMap::new();
         for pub_use in pub_uses {
             let from = unit
@@ -268,6 +287,24 @@ impl<'a> Builder<'a> {
             let entry = per_module.entry(from).or_insert((pub_use.line, 0));
             entry.0 = entry.0.min(pub_use.line);
             entry.1 += 1;
+            if !pub_use.restricted {
+                let named = unit
+                    .document
+                    .occurrences
+                    .iter()
+                    .filter(|o| !o.definition && pub_use.range.holds(o.range));
+                for occurrence in named {
+                    if let Some(&Named::Item(item)) = self.symbols.get(occurrence.symbol)
+                        && self.items[item.index()].module.is_none()
+                    {
+                        reexports.push(Reexport {
+                            item,
+                            file: unit.file,
+                            line: occurrence.range.start.line + 1,
+                        });
+                    }
+                }
+            }
             if let Some(path) = &pub_use.glob_path {
                 let target = unit
                     .document
@@ -302,6 +339,7 @@ impl<'a> Builder<'a> {
                 test: false,
             });
         }
+        reexports
     }
 
     /// `imports`: where the unit's `use` declarations are, in order.
@@ -339,18 +377,43 @@ impl<'a> Builder<'a> {
                 unit.source.mutates(occurrence.range),
             )
         };
+        let holder = unit.holders.innermost_block(occurrence.range);
         self.references.push(Reference {
             file: unit.file,
             line: occurrence.range.start.line + 1,
             from,
-            holder: unit.holders.innermost(occurrence.range),
+            holder: holder.map(|(_, holder)| holder),
             item,
             copies: false,
             mutates,
             test: false,
+            in_signature: false,
+            struct_update: false,
         });
-        self.accesses.push(access);
+        self.sites.push(Site {
+            access,
+            range: occurrence.range,
+            holder: holder.map(|(block, _)| block),
+        });
         Ok(())
+    }
+
+    /// Marks the references that their holders' signatures write, and the
+    /// types that struct literals with a base name.
+    fn mark_signatures(&mut self) {
+        for (at, site) in self.sites.iter().enumerate() {
+            let reference = &self.references[at];
+            let unit = &self.units[reference.file.index()];
+            let holder = reference
+                .holder
+                .zip(site.holder)
+                .map(|(holder, block)| (block, self.items[holder.index()].kind));
+            let written = unit.source.written(site.range, holder);
+            let names_type = self.items[reference.item.index()].kind == ItemKind::Type;
+            let reference = &mut self.references[at];
+            reference.in_signature = written.in_signature;
+            reference.struct_update = written.struct_update && names_type;
+        }
     }
 
     /// Records lines, branch count, parameter count, and (for free functions)
@@ -422,7 +485,7 @@ impl<'a> Builder<'a> {
             if self.items[field.index()].kind != ItemKind::Field {
                 continue;
             }
-            let reads = self.only_reads(self.accesses[at], &[field], &mut plain);
+            let reads = self.only_reads(self.sites[at].access, &[field], &mut plain);
             self.references[at].copies = reads;
         }
     }
@@ -459,7 +522,7 @@ impl<'a> Builder<'a> {
                 && !lent.is_empty()
             {
                 if *to_read {
-                    let reads = self.only_reads(self.accesses[at], lent, &mut plain);
+                    let reads = self.only_reads(self.sites[at].access, lent, &mut plain);
                     self.references[at].copies = reads;
                 } else if !*whole {
                     self.references[at].mutates = true;
