@@ -129,7 +129,7 @@ impl<'a> Builder<'a> {
             glob_reexports: self.glob_reexports,
             module_reexports: self.module_reexports,
             crate_deps,
-            layers: self.workspace.layers.clone(),
+            settings: self.workspace.settings.clone(),
             serde_types,
             traits,
             trait_impls,
@@ -1010,7 +1010,7 @@ mod tests {
                 package("lib", "crates/lib"),
                 package("app", "app"),
             ],
-            layers: Vec::new(),
+            settings: Default::default(),
         };
         let builder = Builder::new(&workspace);
         let tree = &builder.tree;

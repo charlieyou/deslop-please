@@ -9,6 +9,7 @@ mod indexing;
 mod lint;
 mod model;
 mod scip;
+mod settings;
 mod workspace;
 
 use std::fmt;

@@ -7,13 +7,14 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::Error;
+use crate::settings::Settings;
 
 pub struct Workspace {
     pub root: PathBuf,
     pub target_directory: PathBuf,
     pub packages: Vec<Package>,
-    /// Optional crate layer table from `deslop-please.toml`, ordered lowest to highest.
-    pub layers: Vec<Vec<String>>,
+    /// What its `deslop-please.toml` says.
+    pub settings: Settings,
 }
 
 pub struct Package {
@@ -95,12 +96,12 @@ impl Workspace {
             .iter()
             .map(|package| Package::from_metadata(package, &root))
             .collect::<Result<_, _>>()?;
-        let layers = read_layers(&root)?;
+        let settings = Settings::read(&root)?;
         Ok(Workspace {
             root,
             target_directory,
             packages,
-            layers,
+            settings,
         })
     }
 
@@ -197,115 +198,6 @@ fn parse_feature_deps(package: &Value) -> HashSet<String> {
         }
     }
     deps
-}
-
-/// Reads optional `deslop-please.toml` at the workspace root for `layers = [[...], ...]`.
-fn read_layers(root: &Path) -> Result<Vec<Vec<String>>, Error> {
-    let path = root.join("deslop-please.toml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(Error::new(format!("{}: {err}", path.display()))),
-    };
-    parse_layers_toml(&text).map_err(|err| Error::new(format!("{}: {err}", path.display())))
-}
-
-/// Minimal TOML parser for `layers = [["a", "b"], ["c"]]` (no extra dependencies).
-fn parse_layers_toml(text: &str) -> Result<Vec<Vec<String>>, Error> {
-    let stripped: String = text
-        .lines()
-        .map(|line| {
-            let mut in_quotes = false;
-            let mut escaped = false;
-            for (idx, ch) in line.char_indices() {
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                match ch {
-                    '\\' if in_quotes => escaped = true,
-                    '"' => in_quotes = !in_quotes,
-                    '#' if !in_quotes => return &line[..idx],
-                    _ => {}
-                }
-            }
-            line
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let Some(pos) = stripped.find("layers") else {
-        return Ok(Vec::new());
-    };
-    let after_key = stripped[pos + "layers".len()..].trim_start();
-    let Some(after_eq) = after_key.strip_prefix('=') else {
-        return Err(Error::new("expected `=` after `layers`"));
-    };
-    let mut chars = after_eq.trim_start().chars().peekable();
-    if chars.next() != Some('[') {
-        return Err(Error::new("`layers` must be an array of string arrays"));
-    }
-    let mut layers = Vec::new();
-    loop {
-        skip_ws_and_commas(&mut chars);
-        match chars.peek().copied() {
-            Some(']') => {
-                chars.next();
-                break;
-            }
-            Some('[') => {
-                chars.next();
-                let mut layer = Vec::new();
-                loop {
-                    skip_ws_and_commas(&mut chars);
-                    match chars.peek().copied() {
-                        Some(']') => {
-                            chars.next();
-                            break;
-                        }
-                        Some('"') => layer.push(read_quoted(&mut chars)?),
-                        other => {
-                            return Err(Error::new(format!(
-                                "expected quoted crate name, found {other:?}"
-                            )));
-                        }
-                    }
-                }
-                layers.push(layer);
-            }
-            other => return Err(Error::new(format!("expected `[` or `]`, found {other:?}"))),
-        }
-    }
-    Ok(layers)
-}
-
-fn skip_ws_and_commas(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while chars
-        .peek()
-        .is_some_and(|ch| ch.is_whitespace() || *ch == ',')
-    {
-        chars.next();
-    }
-}
-
-fn read_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<String, Error> {
-    if chars.next() != Some('"') {
-        return Err(Error::new("expected `\"`"));
-    }
-    let mut out = String::new();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => return Ok(out),
-            '\\' => {
-                let next = chars
-                    .next()
-                    .ok_or_else(|| Error::new("unterminated escape in string"))?;
-                out.push(next);
-            }
-            _ => out.push(ch),
-        }
-    }
-    Err(Error::new("unterminated string"))
 }
 
 fn target_kind(target: &Value) -> Result<TargetKind, Error> {
@@ -444,30 +336,6 @@ mod tests {
                 root_bin.publish
             ),
             ("", "root_bin", false)
-        );
-    }
-
-    #[test]
-    fn parses_layers_from_toml() {
-        let toml = "\
-# Ordered lowest to highest
-layers = [
-  [\"cards\", \"solver-ids\"],
-  [\"solver-core\"], # middle
-  [\"solver-cli\",],
-]
-";
-        assert_eq!(
-            parse_layers_toml(toml).unwrap(),
-            vec![
-                vec!["cards".to_owned(), "solver-ids".to_owned()],
-                vec!["solver-core".to_owned()],
-                vec!["solver-cli".to_owned()],
-            ]
-        );
-        assert_eq!(
-            parse_layers_toml("# empty\n").unwrap(),
-            Vec::<Vec<String>>::new()
         );
     }
 }

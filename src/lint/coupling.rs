@@ -234,12 +234,12 @@ fn check_feature_envy(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Ve
 }
 
 fn check_layers(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
-    if model.layers.is_empty() {
+    if model.settings.layers.is_empty() {
         return Vec::new();
     }
     let tree = &model.tree;
     let mut layer_of: BTreeMap<&str, usize> = BTreeMap::new();
-    for (index, members) in model.layers.iter().enumerate() {
+    for (index, members) in model.settings.layers.iter().enumerate() {
         for name in members {
             layer_of.insert(name.as_str(), index);
         }
@@ -403,7 +403,7 @@ mod tests {
     fn layer_violation_and_unused_dep_fire_on_crate_deps() {
         let mut sample = Sample::new();
         let pkg = sample.module("");
-        sample.model.layers = vec![vec!["core".into()], vec!["app".into()]];
+        sample.model.settings.layers = vec![vec!["core".into()], vec!["app".into()]];
         sample.model.crate_deps = vec![
             CrateDep {
                 package: pkg,

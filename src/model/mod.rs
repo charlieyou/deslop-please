@@ -11,6 +11,7 @@ pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::{HashMap, HashSet};
 
+use crate::settings::Settings;
 use crate::workspace::TargetKind;
 
 #[derive(Debug, Default)]
@@ -29,8 +30,8 @@ pub struct Model {
     pub module_reexports: Vec<ModuleReexports>,
     /// Normal dependencies declared by each workspace package, with usage info.
     pub crate_deps: Vec<CrateDep>,
-    /// Optional crate layer table from `deslop-please.toml`, ordered lowest to highest.
-    pub layers: Vec<Vec<String>>,
+    /// What the workspace's `deslop-please.toml` says.
+    pub settings: Settings,
     /// Structs/enums deriving `Serialize` or `Deserialize`.
     pub serde_types: HashSet<ItemId>,
     /// Workspace `trait` items.

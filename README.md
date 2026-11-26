@@ -39,6 +39,23 @@ deslop-please --update-allow .deslop-please.allow
 deslop-please --allow .deslop-please.allow 
 ```
 
+### Configuration
+
+`deslop-please.toml` at the workspace's root tells the lints about the
+codebase. Every key is optional, and without the file every lint keeps its
+default. A key the tool does not know is an error, so a misspelt policy never
+goes unnoticed.
+
+```toml
+# The crates by layer, lowest first: a normal dependency must go to a lower
+# layer (`layer-violation`).
+layers = [
+  ["cards", "ids"],
+  ["core"],
+  ["cli"],
+]
+```
+
 ### Add to your `AGENTS.md`
 
 ```markdown

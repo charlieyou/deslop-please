@@ -1188,3 +1188,49 @@ fn single_impl_trait_duplicate_struct_positional_trap_god_hub_and_pub_mod_field_
         "extension trait should not be flagged: {found:?}"
     );
 }
+
+/// Two crates, `low` and `high`, where `low` depends on `high`, and `settings`
+/// as their `deslop-please.toml`.
+fn layered_workspace(test: &str, settings: &str) -> PathBuf {
+    scratch_workspace(
+        test,
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"low\", \"high\"]\nresolver = \"3\"\n",
+            ),
+            ("deslop-please.toml", settings),
+            (
+                "high/Cargo.toml",
+                "[package]\nname = \"high\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            ("high/src/lib.rs", "pub fn top() -> u32 { 1 }\n"),
+            (
+                "low/Cargo.toml",
+                "[package]\nname = \"low\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\nhigh = { path = \"../high\" }\n",
+            ),
+            ("low/src/lib.rs", "pub fn call() -> u32 { high::top() }\n"),
+        ],
+    )
+}
+
+#[test]
+fn the_settings_file_is_toml_and_a_key_it_does_not_know_is_an_error() {
+    // Literal strings and trailing comments, which TOML allows.
+    let downward = "# lowest first\nlayers = [\n  ['high'], # 'low' uses it\n  [\"low\"],\n]\n";
+    let workspace = layered_workspace("settings_toml", downward);
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+    let upward = "layers = [['low'], ['high']]\n";
+    std::fs::write(workspace.join("deslop-please.toml"), upward).unwrap();
+    assert_eq!(keys(&workspace), ["layer-violation low -> high"]);
+
+    std::fs::write(workspace.join("deslop-please.toml"), "layer = [['low']]\n").unwrap();
+    let misspelt = run(&workspace, &[]);
+    assert_eq!(misspelt.code, Some(2));
+    assert!(
+        misspelt.stderr.contains("deslop-please.toml") && misspelt.stderr.contains("`layer`"),
+        "{}",
+        misspelt.stderr
+    );
+}
