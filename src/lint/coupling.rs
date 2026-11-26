@@ -118,10 +118,12 @@ fn fan_out(
     let layer_limit = tree
         .package_of(module)
         .and_then(|package| model.settings.most_fan_out(&tree.node(package).name));
-    // A hub, which many modules depend on, keeps the default limit: a
-    // layer's looser one is for the modules at its edge.
-    let hub = callers.is_some_and(|callers| callers.len() >= MIN_HUB_DEGREE);
-    let layered = layer_limit.filter(|&most| most < MOST_FAN_OUT || !hub);
+    // With god hubs folded in, a hub, which many modules depend on, keeps
+    // the default limit: a layer's looser one is for the modules at its edge.
+    // Without, `god-hub` reports a hub on its own.
+    let hub = model.settings.high_fan_out.fold_god_hub
+        && callers.is_some_and(|callers| callers.len() >= MIN_HUB_DEGREE);
+    let layered = layer_limit.filter(|&most| most <= MOST_FAN_OUT || !hub);
     let most = layered.unwrap_or(MOST_FAN_OUT);
     if targets.len() <= most {
         return None;

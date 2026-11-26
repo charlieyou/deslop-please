@@ -394,13 +394,20 @@ fn a_layer_sets_the_fan_out_limit_from_it_up_and_another_crate_counts_by_its_top
             "high-fan-out low::l1",
         ]
     );
+    let config = "layers = [[\"low\"], [\"high\"]]\n[high-fan-out]\nmost-by-layer = { high = 17 }\n\
+                  other-crates = \"top-module\"\n";
+    std::fs::write(workspace.join("deslop-please.toml"), config).unwrap();
+    // Unfolded, `god-hub` reports `hub` on its own.
+    assert_eq!(
+        fanned(keys(&workspace)),
+        ["high-fan-out high::h3", "high-fan-out low::l1"]
+    );
     std::fs::write(
         workspace.join("deslop-please.toml"),
-        "layers = [[\"low\"], [\"high\"]]\n[high-fan-out]\nmost-by-layer = { high = 17 }\n\
-         other-crates = \"top-module\"\n",
+        format!("{config}fold-god-hub = true\n"),
     )
     .unwrap();
-    // A hub keeps the default limit of 15 under its layer's looser one.
+    // Folded, a hub keeps the default limit of 15 under its layer's looser one.
     assert_eq!(
         fanned(keys(&workspace)),
         [

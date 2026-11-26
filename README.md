@@ -142,8 +142,9 @@ application-crates = ["cli", "server"] # here report only `pub` functions
 # depend on it, and the modules below it are no part of its fan-out.
 fold-god-hub = true
 # The most modules one module may use, from a crate's layer of `layers` up;
-# below the lowest layer named, the default of 15 holds. A hub, a module
-# that 10 or more modules depend on, keeps the default under a looser limit.
+# below the lowest layer named, the default of 15 holds. With
+# `fold-god-hub`, a hub, a module that 10 or more modules depend on, keeps
+# the default under a looser limit.
 most-by-layer = { core = 20, cli = 25 }
 # A use of another crate's module counts as one of its top module,
 # `crate::top_module`; default "module".
