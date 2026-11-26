@@ -406,6 +406,18 @@ layers = [
     }
 
     #[test]
+    fn own_package_is_for_external_tests_only() {
+        let settings = Settings::parse("[test-only-pub]\nexternal-tests = \"own-package\"\n");
+        assert_eq!(
+            settings.unwrap().test_only_pub.external_tests,
+            TestUse::OwnPackage
+        );
+        let error =
+            Settings::parse("[test-only-pub]\ncrate-tests = \"own-package\"\n").unwrap_err();
+        assert!(error.to_string().contains("`external-tests`"), "{error}");
+    }
+
+    #[test]
     fn a_key_this_tool_does_not_know_is_an_error() {
         let error = Settings::parse("layer = [[\"a\"]]\n").unwrap_err();
         assert!(

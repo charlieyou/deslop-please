@@ -602,12 +602,14 @@ fn classify(
     Some(diagnostic)
 }
 
-/// Where a use is, against what it uses: in the library of its package,
-/// in another target of it, or in another package.
+/// Where a use is, against what it uses: in the library of its package, in
+/// a test or bench target of it, in another of its targets, or in another
+/// package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
     Library,
     OwnTarget,
+    OwnOther,
     OtherPackage,
 }
 
@@ -616,8 +618,10 @@ enum Reach {
 fn reach(from: Option<NodeId>, package: Option<NodeId>, target: Option<TargetKind>) -> Reach {
     if from != package {
         Reach::OtherPackage
-    } else if target != Some(TargetKind::Library) {
+    } else if target.is_some_and(TargetKind::is_test) {
         Reach::OwnTarget
+    } else if target != Some(TargetKind::Library) {
+        Reach::OwnOther
     } else {
         Reach::Library
     }

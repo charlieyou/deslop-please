@@ -136,6 +136,11 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
             ("core/src/lib.rs", &lib("core_t")),
             ("core/tests/it.rs", &it("core_t")),
             (
+                "core/examples/demo.rs",
+                "fn main() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    \
+                 fn demo() { assert_eq!(core_t::checked(), 6); }\n}\n",
+            ),
+            (
                 "other/Cargo.toml",
                 &format!(
                     "{}[dev-dependencies]\ncore_t = {{ path = \"../core\" }}\n",
@@ -206,8 +211,9 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
         "[test-only-pub]\ncrates = [\"core-t\"]\nexternal-tests = \"own-package\"\n",
     )
     .unwrap();
-    // Its own `tests/` justify `tested`; another package's do not justify
-    // `checked`, and tests in the crate no `pub(crate)` item.
+    // Its own `tests/` justify `tested`; neither its example's test nor
+    // another package's justifies `checked`, and tests in the crate no
+    // `pub(crate)` item.
     configured.push("test-only-pub core_t::a::helper".to_owned());
     configured.push("test-only-pub core_t::checked".to_owned());
     configured.sort();
