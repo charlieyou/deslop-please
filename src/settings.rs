@@ -55,9 +55,10 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct DuplicateCode {
-    /// Copies that each are `#[inline(always)]` or `#[target_feature]` and
-    /// call the CPU's intrinsics are SIMD helpers that each kernel module
-    /// keeps its own of, so that they compile with its features.
+    /// Copies in one crate that each are `#[inline(always)]` or
+    /// `#[target_feature]` and call the CPU's intrinsics are SIMD helpers
+    /// that each kernel module keeps its own of, so that they compile with
+    /// its features.
     pub simd: bool,
 }
 

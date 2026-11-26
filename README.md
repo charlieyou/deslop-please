@@ -171,7 +171,8 @@ clap-derives = true    # so may one deriving clap's `Parser`, `Args` or `Subcomm
 [duplicate-code]
 # Copies that each are `#[inline(always)]` or `#[target_feature]` and whose
 # bodies call the CPU's intrinsics (`_mm*`, `arch::`) are SIMD helpers each
-# kernel module keeps its own of.
+# kernel module keeps its own of. Copies in different crates are still
+# reported: they could share one helper.
 simd = true
 
 [long-file]

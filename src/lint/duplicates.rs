@@ -101,13 +101,19 @@ fn check_functions(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<D
 }
 
 /// Whether every one of `entries` is a SIMD helper: compiled for a CPU's
-/// features, and calling its intrinsics.
+/// features, and calling its intrinsics. Each kernel module of a crate keeps
+/// its own; a copy in another crate could be shared with it.
 fn simd(model: &Model, entries: &[(String, NodeId, Location, ItemId)]) -> bool {
-    entries.iter().all(|&(.., id)| {
-        model.items[id.index()].metrics.is_some_and(|metrics| {
-            let codegen = metrics.codegen;
-            (codegen.inline_always || codegen.target_feature) && codegen.intrinsics
-        })
+    let tree = &model.tree;
+    let package = entries
+        .first()
+        .and_then(|&(_, home, ..)| tree.package_of(home));
+    entries.iter().all(|&(_, home, _, id)| {
+        tree.package_of(home) == package
+            && model.items[id.index()].metrics.is_some_and(|metrics| {
+                let codegen = metrics.codegen;
+                (codegen.inline_always || codegen.target_feature) && codegen.intrinsics
+            })
     })
 }
 

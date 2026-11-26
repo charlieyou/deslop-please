@@ -693,6 +693,38 @@ fn simd_helpers_each_kernel_keeps_a_copy_of_are_no_duplicates_when_configured() 
             "duplicate-code simd::avx::plain,simd::sse::plain",
         ]
     );
+    // Copies in two crates could be one helper they share.
+    let package = |name: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")
+    };
+    let crates = scratch_workspace(
+        "simd_across_crates",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"one\", \"two\"]\nresolver = \"3\"\n",
+            ),
+            ("one/Cargo.toml", &package("one")),
+            (
+                "one/src/lib.rs",
+                &format!("//! One.\n{}", helpers("#[inline(always)]")),
+            ),
+            ("two/Cargo.toml", &package("two")),
+            (
+                "two/src/lib.rs",
+                &format!("//! Two.\n{}", helpers("#[inline(always)]")),
+            ),
+            ("deslop-please.toml", "[duplicate-code]\nsimd = true\n"),
+        ],
+    );
+    assert_eq!(
+        duplicates(keys(&crates)),
+        [
+            "duplicate-code one::lanes,two::lanes",
+            "duplicate-code one::mixed,two::mixed",
+            "duplicate-code one::plain,two::plain",
+        ]
+    );
 }
 
 #[test]
