@@ -65,10 +65,13 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let kept = fields.iter().any(|field| !outside.contains_key(field));
         let type_item = graph.things[thing.index()].item;
         let is_serde = model.is_serde(type_item);
+        // Every field `pub`: a `pub(crate)` one is still guarded from
+        // other crates, and widening a type's last private field to it
+        // must not silence the lint.
         let plain = policy.plain_data
             && fields
                 .iter()
-                .all(|field| model.items[field.index()].visibility != Visibility::Private);
+                .all(|field| model.items[field.index()].visibility == Visibility::Pub);
         if !kept || !working.contains(&thing) || plain {
             if let Some(diag) = shared_mutable_bag(model, graph, thing, &fields, &outside, scope) {
                 diagnostics.push(diag);

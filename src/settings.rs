@@ -108,8 +108,8 @@ pub struct LongFile {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct FieldLeak {
-    /// A struct with no private field is plain data, which guards nothing:
-    /// `shared-mutable-bag` judges it, not `field-leak`.
+    /// A struct whose fields are all `pub` is plain data, which guards
+    /// nothing: `shared-mutable-bag` judges it, not `field-leak`.
     pub plain_data: bool,
     /// Code in a type's home module is inside it for its private fields,
     /// which rustc lets that module use.

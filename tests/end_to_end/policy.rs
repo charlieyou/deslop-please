@@ -404,9 +404,20 @@ pub mod data {
         pub fn total(&self) -> usize { self.f.len() }
     }
     pub fn poke(kept: &mut Kept) { kept.d.push(1); kept.e.push(2); }
+    pub struct Crated { pub g: Vec<u32>, pub(crate) h: Vec<u32>, pub i: Vec<u32> }
+    impl Crated {
+        pub fn new() -> Crated { Crated { g: Vec::new(), h: Vec::new(), i: Vec::new() } }
+        pub fn total(&self) -> usize { self.i.len() }
+    }
 }
-pub mod x { pub fn grow(plain: &mut crate::data::Plain) { plain.a.push(1); } }
-pub mod y { pub fn grow(plain: &mut crate::data::Plain) { plain.b.push(1); } }
+pub mod x {
+    pub fn grow(plain: &mut crate::data::Plain) { plain.a.push(1); }
+    pub fn fill(crated: &mut crate::data::Crated) { crated.g.push(1); }
+}
+pub mod y {
+    pub fn grow(plain: &mut crate::data::Plain) { plain.b.push(1); }
+    pub fn fill(crated: &mut crate::data::Crated) { crated.h.push(1); }
+}
 ";
     let workspace = scratch_workspace(
         "plain_data",
@@ -426,6 +437,8 @@ pub mod y { pub fn grow(plain: &mut crate::data::Plain) { plain.b.push(1); } }
     assert_eq!(
         leaks(keys(&workspace)),
         [
+            "field-leak bags::data::Crated::g",
+            "field-leak bags::data::Crated::h",
             "field-leak bags::data::Kept::d",
             "field-leak bags::data::Kept::e",
             "field-leak bags::data::Plain::a",
@@ -437,10 +450,13 @@ pub mod y { pub fn grow(plain: &mut crate::data::Plain) { plain.b.push(1); } }
         "[field-leak]\nplain-data = true\nhome-module = true\n",
     )
     .unwrap();
-    // `poke` may use the private `e`, not the `pub` `d`.
+    // `poke` may use the private `e`, not the `pub` `d`; a `pub(crate)`
+    // field still guards `Crated`, which is no plain data.
     assert_eq!(
         leaks(keys(&workspace)),
         [
+            "field-leak bags::data::Crated::g",
+            "field-leak bags::data::Crated::h",
             "field-leak bags::data::Kept::d",
             "shared-mutable-bag bags::data::Plain",
         ]

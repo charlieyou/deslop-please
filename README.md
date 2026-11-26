@@ -149,8 +149,9 @@ most-by-layer = { core = 20, cli = 25 }
 other-crates = "top-module"
 
 [field-leak]
-# A struct with no private field is plain data, which guards nothing:
-# `shared-mutable-bag` judges it, not `field-leak`.
+# A struct whose fields are all `pub` is plain data, which guards nothing:
+# `shared-mutable-bag` judges it, not `field-leak`. A `pub(crate)` or
+# `pub(super)` field still guards it from others.
 plain-data = true
 # Code in a type's module is inside it for its private fields, as rustc
 # lets it be; a private field it alone uses keeps the struct guarding.
