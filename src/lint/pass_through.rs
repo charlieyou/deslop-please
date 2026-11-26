@@ -8,7 +8,7 @@
 //!    module, or already-`pub` child module (private-child splits like
 //!    `mod parts; pub use parts::*;` are allowed).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
     Diagnostic, EncapsulationLint, Lint, Location, Picture, counted, in_scope, item_location,
@@ -41,6 +41,7 @@ fn check_wrappers(
         .map(|(&item, wrapper)| (item, wrapper))
         .collect();
     wrappers.sort_by_key(|&(item, _)| item);
+    let twinned = twinned(model, &wrappers);
 
     for (func, wrapper) in wrappers {
         let item = &model.items[func.index()];
@@ -106,7 +107,10 @@ fn check_wrappers(
             Wrapper::Forwarder { target, fields } => {
                 let target_item = &model.items[target.index()];
                 // A safe wrapper around an `unsafe fn` is a real safety boundary.
-                if !item.is_unsafe && target_item.is_unsafe {
+                if (!item.is_unsafe && target_item.is_unsafe)
+                    || item.metrics.is_some_and(|m| m.decides)
+                    || twinned.contains(target)
+                {
                     continue;
                 }
                 let hides_private_field = !fields.is_empty()
@@ -153,6 +157,23 @@ fn check_wrappers(
             }
         }
     }
+}
+
+/// The functions that a forwarder built for other code generation calls:
+/// one with `#[target_feature]` or `#[cold]`, which is how a kernel gets a
+/// twin for each instruction set or a path kept out of line. Each forwarder
+/// to such a function is a twin of the others.
+fn twinned(model: &Model, wrappers: &[(ItemId, &Wrapper)]) -> HashSet<ItemId> {
+    wrappers
+        .iter()
+        .filter_map(|&(function, wrapper)| match wrapper {
+            Wrapper::Forwarder { target, .. } => {
+                let codegen = model.items[function.index()].metrics?.codegen;
+                (codegen.target_feature || codegen.cold).then_some(*target)
+            }
+            Wrapper::Accessor { .. } => None,
+        })
+        .collect()
 }
 
 fn check_glob_reexports(model: &Model, scope: Option<NodeId>, diagnostics: &mut Vec<Diagnostic>) {

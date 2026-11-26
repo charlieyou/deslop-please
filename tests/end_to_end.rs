@@ -1526,3 +1526,41 @@ fn an_example_is_neither_measured_nor_coupled_but_still_justifies_pub() {
     );
     assert_eq!(keys(&workspace), Vec::<String>::new());
 }
+
+#[test]
+fn a_twin_built_for_other_code_generation_or_a_body_that_decides_passes_nothing_through() {
+    let lib = "\
+//! Kernels.
+pub fn body(xs: &mut [f32]) { for x in xs.iter_mut() { *x += 1.0; } }
+#[target_feature(enable = \"avx2\")]
+pub unsafe fn body_avx2(xs: &mut [f32]) { body(xs) }
+#[inline(never)]
+pub fn body_portable(xs: &mut [f32]) { body(xs) }
+pub fn other(xs: &mut [f32]) { for x in xs.iter_mut() { *x *= 2.0; } }
+pub fn plain(xs: &mut [f32]) { other(xs) }
+pub fn heads_up(n: u32) -> bool { n == 2 }
+pub fn seats(n: u32) -> u32 { if heads_up(n) { 7 } else { 10 } }
+pub fn scaled<const N: u32>() -> u32 { N * 3 }
+pub fn fixed() -> u32 { scaled::<2>() }
+pub struct Inner; impl Inner { pub fn step(&self, n: u32) -> u32 { n * n + 1 } }
+pub struct Outer(pub Inner); impl Outer { pub fn step(&self, n: u32) -> u32 { self.0.step(n) } }
+";
+    let workspace = scratch_workspace(
+        "codegen_twins",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"twins\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+        ],
+    );
+    // `self.0` names a field, no value of the forwarder's own.
+    assert_eq!(
+        keys(&workspace),
+        [
+            "pass-through twins::Outer::step",
+            "pass-through twins::plain"
+        ]
+    );
+}

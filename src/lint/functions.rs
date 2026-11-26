@@ -185,8 +185,8 @@ mod tests {
             branches: 31,
             params: 8,
             returns_string_error: true,
-            body_fingerprint: None,
             positional_trap: Some(PositionalTrap::Booleans(2)),
+            ..FunctionMetrics::default()
         });
         assert_eq!(
             report(&sample),

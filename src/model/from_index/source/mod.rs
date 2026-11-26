@@ -15,7 +15,7 @@ pub use uses::{Access, Plain};
 
 use std::collections::HashSet;
 
-use crate::model::{FunctionMetrics, ItemKind};
+use crate::model::{Codegen, FunctionMetrics, ItemKind};
 use crate::scip::{Position, Range};
 use tokens::{Kind, Token};
 
@@ -335,9 +335,15 @@ impl Source {
                         .map_or(header_end, |w| ret_start + w);
                     metrics::returns_string_error(&self.text, &tokens[ret_start..ret_end])
                 });
-        let (branches, body_fingerprint) = match body_open {
-            Some(bo) => {
-                let body_tokens = &tokens[bo + 1..last];
+        let body_tokens = body_open.map_or(&[][..], |bo| &tokens[bo + 1..last]);
+        let (branches, body_fingerprint, decides) = match body_open {
+            Some(_) => {
+                // A number after `.` is a tuple field, as in `self.0`.
+                let decides = body_tokens.iter().enumerate().any(|(at, t)| {
+                    let field = at > 0 && self.is(body_tokens[at - 1], ".");
+                    (t.kind == Kind::Literal && !field)
+                        || matches!(self.text(*t), "if" | "match" | "true" | "false")
+                });
                 let branches = body_tokens
                     .iter()
                     .filter(|t| {
@@ -348,9 +354,9 @@ impl Source {
                     })
                     .count() as u32;
                 let fp = metrics::body_fingerprint(&self.text, param_tokens, body_tokens);
-                (branches, fp)
+                (branches, fp, decides)
             }
-            None => (0, None),
+            None => (0, None, false),
         };
 
         let last_line = if item.end.column == 0 {
@@ -366,9 +372,34 @@ impl Source {
                 returns_string_error,
                 body_fingerprint,
                 positional_trap,
+                codegen: self.codegen(&tokens[..fn_pos]),
+                decides,
             },
             first_type,
         ))
+    }
+
+    /// What the attributes among `tokens`, those before a function's `fn`,
+    /// ask of its code generation.
+    fn codegen(&self, tokens: &[Token]) -> Codegen {
+        let mut codegen = Codegen::default();
+        for (at, token) in tokens.iter().enumerate() {
+            if !self.is(*token, "#") || !tokens.get(at + 1).is_some_and(|t| self.is(*t, "[")) {
+                continue;
+            }
+            let words: Vec<&str> = tokens[at + 2..]
+                .iter()
+                .take(4)
+                .map(|t| self.text(*t))
+                .collect();
+            match words.as_slice() {
+                ["target_feature", ..] => codegen.target_feature = true,
+                ["cold", ..] => codegen.cold = true,
+                ["inline", "(", "always", ..] => codegen.inline_always = true,
+                _ => {}
+            }
+        }
+        codegen
     }
 
     fn first_param_type_in(&self, params: &[Token]) -> Option<Range> {

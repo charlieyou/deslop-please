@@ -80,6 +80,22 @@ pub struct FunctionMetrics {
     pub returns_string_error: bool,
     pub body_fingerprint: Option<BodyFingerprint>,
     pub positional_trap: Option<PositionalTrap>,
+    /// How its attributes ask the compiler to build it.
+    pub codegen: Codegen,
+    /// Its body decides or supplies something of its own: an `if`, a
+    /// `match`, or a literal, which no forwarder has.
+    pub decides: bool,
+}
+
+/// Attributes that change how a function is compiled, not what it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Codegen {
+    /// `#[target_feature(..)]`.
+    pub target_feature: bool,
+    /// `#[cold]`.
+    pub cold: bool,
+    /// `#[inline(always)]`.
+    pub inline_always: bool,
 }
 
 /// An item's declared visibility, ordered from narrowest to widest.
