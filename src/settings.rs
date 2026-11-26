@@ -32,6 +32,8 @@ pub struct Settings {
     pub high_fan_out: HighFanOut,
     /// Which structs guard their fields, and who is inside them.
     pub field_leak: FieldLeak,
+    /// Which mutations share a struct.
+    pub shared_mutable_bag: SharedMutableBag,
     /// Which lines of a file count.
     pub long_file: LongFile,
     /// Which structs may hold many fields.
@@ -51,6 +53,15 @@ pub struct DuplicateCode {
     /// call the CPU's intrinsics are SIMD helpers that each kernel module
     /// keeps its own of, so that they compile with its features.
     pub simd: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SharedMutableBag {
+    /// Code that mutates a value its function owns shares it with no one:
+    /// a variable whose type, as the index has it, borrows nothing. Through
+    /// a `&mut` it still does.
+    pub owned_locals: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

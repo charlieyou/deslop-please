@@ -8,17 +8,19 @@ mod source;
 mod targets;
 mod wrappers;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{
     CrateDep, File, FileId, GlobReexport, Item, ItemId, ItemKind, Mention, Model, ModuleReexports,
     NodeId, NodeKind, Reexport, Reference, TraitImpl, Tree, Visibility, Wrapper,
 };
-use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
+use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Position, Range, Symbol};
 use crate::workspace::{Package, Workspace};
 use blocks::Blocks;
-use source::{Access, ImplBlock, Macros, Plain, PubUse, Source, TextPath};
+use source::{
+    Access, ImplBlock, Macros, Mutation, Plain, PubUse, Source, TextPath, owned_type, type_name,
+};
 
 /// The model of `workspace` from its `index`, with `consumed`, what its
 /// consumers use of it: each symbol, and whether test code uses it.
@@ -144,6 +146,7 @@ impl<'a> Builder<'a> {
     /// The model, once every document is in.
     fn finish(mut self, index: &Index, consumed: &[(String, bool)]) -> Model {
         let traits = self.read_symbol_information(index);
+        self.mark_owned(index);
         self.mark_signatures();
         self.mark_test_code();
         self.place_in_types();
@@ -569,15 +572,15 @@ impl<'a> Builder<'a> {
             .inline_modules
             .innermost(occurrence.range)
             .unwrap_or(module);
-        let (access, mutates) = if self.functions.contains(&item) {
-            (unit.source.call_access(occurrence.range), false)
+        let holder = unit.holders.innermost_block(occurrence.range);
+        let (access, mutation) = if self.functions.contains(&item) {
+            (unit.source.call_access(occurrence.range), Mutation::None)
         } else {
             (
                 unit.source.access(occurrence.range),
                 unit.source.mutates(occurrence.range),
             )
         };
-        let holder = unit.holders.innermost_block(occurrence.range);
         self.references.push(Reference {
             file: unit.file,
             line: occurrence.range.start.line + 1,
@@ -585,7 +588,8 @@ impl<'a> Builder<'a> {
             holder: holder.map(|(_, holder)| holder),
             item,
             copies: false,
-            mutates,
+            mutates: mutation != Mutation::None,
+            owned: false,
             test: false,
             in_signature: false,
             struct_update: false,
@@ -835,6 +839,61 @@ impl<'a> Builder<'a> {
         }
         self.places.insert(id, place);
         Some(id)
+    }
+
+    /// Marks each mutation whose path, the variable and the fields that lead
+    /// to the field it mutates, holds values of the function's own: each
+    /// type, as the index declares it, borrows nothing, and the variable's
+    /// is a type of the workspace's, no type parameter that may be `&mut`.
+    fn mark_owned(&mut self, index: &Index) {
+        // A `local N` symbol is only its document's: those are by document.
+        let declared: HashMap<&str, &str> = index
+            .documents
+            .iter()
+            .flat_map(|document| &document.symbols)
+            .filter(|symbol| !symbol.signature.is_empty() && !symbol.symbol.starts_with("local "))
+            .map(|symbol| (symbol.symbol, symbol.signature))
+            .collect();
+        let types: HashSet<&str> = self
+            .items
+            .iter()
+            .filter(|item| item.kind == ItemKind::Type)
+            .map(|item| item.name.rsplit("::").next().unwrap_or(&item.name))
+            .collect();
+        let units: HashMap<FileId, &Unit> =
+            self.units.iter().map(|unit| (unit.file, unit)).collect();
+        // By file, how the index declares what each place names.
+        let mut by_file: HashMap<FileId, BTreeMap<Position, &str>> = HashMap::new();
+        for (at, reference) in self.references.iter_mut().enumerate() {
+            let Some(unit) = units.get(&reference.file).filter(|_| reference.mutates) else {
+                continue;
+            };
+            let Mutation::Of(path) = unit.source.mutates(self.sites[at].range) else {
+                continue;
+            };
+            let signatures = by_file.entry(unit.file).or_insert_with(|| {
+                let locals: HashMap<&str, &str> = unit
+                    .document
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.symbol.starts_with("local "))
+                    .map(|symbol| (symbol.symbol, symbol.signature))
+                    .collect();
+                unit.document
+                    .occurrences
+                    .iter()
+                    .filter_map(|o| {
+                        let signature = locals.get(o.symbol).or_else(|| declared.get(o.symbol));
+                        Some((o.range.start, *signature?))
+                    })
+                    .collect()
+            });
+            let root = signatures.get(&path.start).copied();
+            reference.owned = root.is_some_and(|root| types.contains(type_name(root)))
+                && signatures
+                    .range(path.start..path.end)
+                    .all(|(_, signature)| owned_type(signature));
+        }
     }
 
     fn read_symbol_information(&mut self, index: &Index) -> HashSet<ItemId> {

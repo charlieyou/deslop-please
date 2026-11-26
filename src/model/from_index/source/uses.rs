@@ -5,6 +5,19 @@ use super::Source;
 use super::tokens::{Kind, Token};
 use crate::scip::Range;
 
+/// Whose value code that mutates a field mutates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mutation {
+    /// None: it reads the field, or does not name one.
+    None,
+    /// What the path at that range holds, a variable and the fields that
+    /// lead to the field: `s` of `s.field`, `params.knobs` of
+    /// `params.knobs.field`. Their types say whose value it is.
+    Of(Range),
+    /// A value that no variable names: what a call returns, an element.
+    Shared,
+}
+
 /// What code does with a field it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
@@ -104,6 +117,35 @@ const TEXT: [&str; 8] = [
     "CStr", "CString", "OsStr", "OsString", "Path", "PathBuf", "String", "str",
 ];
 
+/// Types of a value whose clones share it, or that borrow what they guard.
+const SHARED_HANDLES: [&str; 5] = ["Arc", "Rc", "Ref", "RefMut", "Cow"];
+
+/// Whether a variable that the index's `signature` declares, as in
+/// `let mut config: RakeConfig` or `knobs: &mut Knobs`, holds a value of its
+/// own: its type borrows nothing (no `&`, `*` or lifetime anywhere in it),
+/// is no `impl` or `dyn`, and is no shared handle or guard.
+pub fn owned_type(signature: &str) -> bool {
+    let Some((_, ty)) = signature.split_once(':') else {
+        return false;
+    };
+    let ty = ty.trim();
+    let name = type_name(signature);
+    !ty.is_empty()
+        && !ty.contains(['&', '*', '\''])
+        && !ty.starts_with("impl ")
+        && !ty.starts_with("dyn ")
+        && !SHARED_HANDLES.contains(&name)
+        && !name.contains("Guard")
+}
+
+/// The name of the type that `signature` declares, without its path or
+/// generics: `Knobs` of `mut knobs: crate::Knobs<u8>`.
+pub fn type_name(signature: &str) -> &str {
+    let ty = signature.split_once(':').map_or("", |(_, ty)| ty.trim());
+    let ty = ty.split('<').next().unwrap_or(ty);
+    ty.rsplit("::").next().unwrap_or(ty).trim()
+}
+
 /// What holds plain data and is plain data with it.
 const HOLDS_DATA: [&str; 3] = ["Box", "Option", "Vec"];
 
@@ -142,17 +184,37 @@ impl Source {
 
     /// Whether the code that names a field at `name` mutates it (writes it,
     /// takes `&mut`, writes through indexing `f[i] = ..`, or calls a mutating
-    /// method on it). Plain reads, shared borrows, and read-only indexing
-    /// return `false`.
-    pub fn mutates(&self, name: Range) -> bool {
+    /// method on it), and whose value it mutates. Plain reads, shared
+    /// borrows, and read-only indexing mutate nothing.
+    pub fn mutates(&self, name: Range) -> Mutation {
         let tokens = &self.tokens;
         let Some(offset) = self.offset(name.start) else {
-            return false;
+            return Mutation::None;
         };
         let at = tokens.partition_point(|token| token.start < offset);
         if at == 0 || at >= tokens.len() || !self.is(tokens[at - 1], ".") {
-            return false;
+            return Mutation::None;
         }
+        if !self.mutates_at(at) {
+            return Mutation::None;
+        }
+        // The variable at the root of the path of fields before the `.`.
+        let Some(mut root) = at.checked_sub(2) else {
+            return Mutation::Shared;
+        };
+        while root >= 2 && self.is(tokens[root - 1], ".") && tokens[root - 2].kind == Kind::Ident {
+            root -= 2;
+        }
+        let bare = root == 0 || !matches!(self.text(tokens[root - 1]), "." | "::");
+        if tokens[root].kind != Kind::Ident || !bare {
+            return Mutation::Shared;
+        }
+        Mutation::Of(self.range(tokens[root].start, tokens[at - 2].end))
+    }
+
+    /// Whether the code that names a field at token `at` mutates it.
+    fn mutates_at(&self, at: usize) -> bool {
+        let tokens = &self.tokens;
         if self.borrowed(at) == Some(true) {
             return true;
         }
@@ -660,7 +722,9 @@ mod tests {
 
     #[test]
     fn mutates_distinguishes_writes_and_mutating_calls_from_reads() {
-        let mutates = |code: &str| Source::new(code.to_owned()).mutates(range(code, ".field", 1));
+        let mutates = |code: &str| {
+            Source::new(code.to_owned()).mutates(range(code, ".field", 1)) != Mutation::None
+        };
         for yes in [
             "s.field = 1;",
             "s.field += 1;",
@@ -681,6 +745,56 @@ mod tests {
             "let c = s.field.clone();",
         ] {
             assert!(!mutates(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn a_mutation_names_the_path_of_the_variable_and_fields_it_goes_through() {
+        let path = |code: &str| match Source::new(code.to_owned()).mutates(range(code, ".field", 1))
+        {
+            Mutation::Of(root) => {
+                Some(code[root.start.column as usize..root.end.column as usize].to_owned())
+            }
+            _ => None,
+        };
+        assert_eq!(path("s.field.push(1);").as_deref(), Some("s"));
+        assert_eq!(
+            path("params.knobs.s.field = 1;").as_deref(),
+            Some("params.knobs.s")
+        );
+        assert_eq!(path("self.field = 1;").as_deref(), Some("self"));
+        assert_eq!(path("t.get().field = 1;"), None);
+        assert_eq!(path("v[0].field = 1;"), None);
+        assert_eq!(path("crate::S.field = 1;"), None);
+    }
+
+    #[test]
+    fn a_variable_owns_a_value_whose_type_borrows_nothing() {
+        for owned in [
+            "let mut config: RakeConfig",
+            "mut knobs: Vector2Knobs",
+            "let mut rows: Vec<(u8, String)>",
+            "mut s: std::collections::HashMap<u32, Box<S>>",
+            "self: Builder",
+        ] {
+            assert!(owned_type(owned), "{owned}");
+        }
+        for shared in [
+            "s: &mut S",
+            "let s: &mut S",
+            "found: Option<&mut S>",
+            "s: Pin<&mut S>",
+            "c: Ctx<'_>",
+            "s: std::cell::RefMut<'_, S>",
+            "s: MutexGuard<S>",
+            "g: MutexGuardArc<S>",
+            "pub state: OwnedMutexGuard<Bag>",
+            "s: Arc<S>",
+            "s: *mut S",
+            "s: impl BagMut",
+            "let s",
+        ] {
+            assert!(!owned_type(shared), "{shared}");
         }
     }
 }

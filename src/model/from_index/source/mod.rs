@@ -13,7 +13,7 @@ mod uses;
 
 pub use mentions::TextPath;
 pub use metrics::PubUse;
-pub use uses::{Access, Plain};
+pub use uses::{Access, Mutation, Plain, owned_type, type_name};
 
 use std::collections::HashSet;
 

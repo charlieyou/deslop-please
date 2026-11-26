@@ -657,3 +657,93 @@ fn simd_helpers_each_kernel_keeps_a_copy_of_are_no_duplicates_when_configured() 
         ]
     );
 }
+
+#[test]
+fn a_value_its_function_owns_is_shared_with_no_one_when_configured() {
+    let lib = "//! Bags.\n\
+pub mod data {
+    pub struct Built { pub items: Vec<u32>, pub size: u32 }
+    impl Built { pub fn new() -> Built { Built { items: Vec::new(), size: 0 } } }
+    pub struct Shared { pub items: Vec<u32>, pub size: u32 }
+    pub struct Found { pub items: Vec<u32>, pub size: u32 }
+    pub struct Through { pub items: Vec<u32>, pub size: u32 }
+}
+pub mod x;
+pub mod y;
+pub mod v;
+pub mod w;
+pub mod z {
+    use crate::data::{Found, Through};
+    pub fn bump(built: &mut crate::data::Built) { built.size += 1; }
+    pub fn first(all: &mut [Found]) { if let Some(found) = all.first_mut() { found.items.push(1); } }
+    pub fn deref<B: std::ops::DerefMut<Target = Through>>(mut b: B) { b.size = 1; }
+}
+pub mod u {
+    use crate::data::{Found, Through};
+    pub fn last(all: &mut [Found]) { let found = all.last_mut().unwrap(); found.size = 2; }
+    pub struct Holder { pub through: &'static mut Through }
+    pub fn held(mut holder: Holder) { holder.through.items.clear(); }
+}
+";
+    // Each file's first variable is its `local 0` in the index: `x`'s and
+    // `y`'s own their values, `v`'s and `w`'s borrow theirs.
+    let workspace = scratch_workspace(
+        "owned_locals",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"bags\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            (
+                "src/x.rs",
+                "use crate::data::Built;\n\
+                 pub fn build() -> Built { let mut built = Built::new(); built.items.push(1); built }\n",
+            ),
+            (
+                "src/y.rs",
+                "use crate::data::Built;\n\
+                 pub fn sized(mut built: Built) -> Built { built.size = 2; built }\n",
+            ),
+            (
+                "src/v.rs",
+                "use crate::data::Shared;\npub fn grow(shared: &mut Shared) { shared.items.push(1); }\n",
+            ),
+            (
+                "src/w.rs",
+                "use crate::data::Shared;\npub fn resize(shared: &mut Shared) { shared.size = 2; }\n",
+            ),
+            ("src/lib.rs", lib),
+        ],
+    );
+    let bags = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("shared-mutable-bag "))
+            .collect()
+    };
+    assert_eq!(
+        bags(keys(&workspace)),
+        [
+            "shared-mutable-bag bags::data::Built",
+            "shared-mutable-bag bags::data::Found",
+            "shared-mutable-bag bags::data::Shared",
+            "shared-mutable-bag bags::data::Through",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[shared-mutable-bag]\nowned-locals = true\n",
+    )
+    .unwrap();
+    // Only `z` mutates a `Built` it does not own; `&mut` still shares, as
+    // does what a `let` or `if let` finds through one, a type parameter that
+    // may be a borrow, and a field that is one. A file's variables are its
+    // own: `v`'s `local 0` is not `x`'s.
+    assert_eq!(
+        bags(keys(&workspace)),
+        [
+            "shared-mutable-bag bags::data::Found",
+            "shared-mutable-bag bags::data::Shared",
+            "shared-mutable-bag bags::data::Through",
+        ]
+    );
+}

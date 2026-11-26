@@ -280,6 +280,9 @@ pub struct Reference {
     /// For a field: the code writes it, borrows it mutably, or calls a
     /// mutating method on it (not a plain read, shared borrow, or read index).
     pub mutates: bool,
+    /// It mutates a variable its function owns, or a field of one: one whose
+    /// type, as the index declares it, borrows nothing.
+    pub owned: bool,
     pub test: bool,
     /// Its holder's signature writes it: a function's parameters, return
     /// type, generics or bounds, the type of a field or constant, a type's
@@ -471,6 +474,7 @@ pub mod tests {
                 item,
                 copies: false,
                 mutates: false,
+                owned: false,
                 test: false,
                 in_signature: false,
                 struct_update: false,

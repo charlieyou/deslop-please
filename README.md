@@ -113,6 +113,13 @@ plain-data = true
 # lets it be; a private field it alone uses keeps the struct guarding.
 home-module = true
 
+[shared-mutable-bag]
+# Code that mutates a value its function owns shares it with no one. A
+# variable owns its value when its type, as rust-analyzer infers it, borrows
+# nothing (no `&`, `*` or lifetime in it) and is no `Rc`, `Arc`, `RefMut` or
+# guard: `let mut config = Config::new()` does, `s: &mut S` does not.
+owned-locals = true
+
 [wide-struct]
 passive-records = true # a struct with no method of its own that takes `self` may be wide
 clap-derives = true    # so may one deriving clap's `Parser`, `Args` or `Subcommand`

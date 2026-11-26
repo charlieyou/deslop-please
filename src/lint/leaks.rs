@@ -128,7 +128,10 @@ fn shared_mutable_bag(
     for &field in fields {
         for usage in outside.get(&field).into_iter().flatten() {
             let reference = &model.references[usage.reference];
-            if !reference.mutates || tree.is_within(reference.from, home) {
+            if !reference.mutates
+                || (reference.owned && model.settings.shared_mutable_bag.owned_locals)
+                || tree.is_within(reference.from, home)
+            {
                 continue;
             }
             let at = Location {
