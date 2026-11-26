@@ -40,6 +40,8 @@ pub struct Settings {
     pub wide_struct: WideStruct,
     /// Which copies of a body are no duplicates.
     pub duplicate_code: DuplicateCode,
+    /// How `--update-allow` and `--allow` treat the allowlist.
+    pub allow: Allow,
     /// Features that build code only for tests, such as `test-utils`. Set,
     /// even empty, it makes an item that a `cfg` attribute builds only for
     /// `test` or these features test code, as a module is.
@@ -62,6 +64,20 @@ pub struct SharedMutableBag {
     /// a variable whose type, as the index has it, borrows nothing. Through
     /// a `&mut` it still does.
     pub owned_locals: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Allow {
+    /// `--update-allow` writes each new entry with what its diagnostic
+    /// measures as its ceiling, `<= N`, which no update raises.
+    pub ceilings: bool,
+    /// A stale entry allows a new diagnostic that nothing else allows with
+    /// its lint, crate, last name and, for a member, type, or a circle no
+    /// bigger that shares most of its members: the same debt, moved. A
+    /// file's or directory's entry follows no move. `--prune-allow` rewrites
+    /// it, and `--strict-allow` fails until then.
+    pub follow_moves: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

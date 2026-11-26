@@ -187,6 +187,25 @@ pub struct Diagnostic {
     pub picture: Picture,
 }
 
+impl Diagnostic {
+    /// How much of what its lint limits it has, which an allowlist entry's
+    /// ceiling caps: a bar's length, the functions a module shows, the
+    /// places that know a field. `None` for a circle or an arrow, which
+    /// have no size to cap, and for a visibility lint, whose item is either
+    /// too visible or not.
+    pub fn measure(&self) -> Option<usize> {
+        if matches!(self.lint, Lint::Surface(_)) {
+            return None;
+        }
+        match &self.picture {
+            Picture::Bar { length, .. } => Some(*length),
+            Picture::Lists { shown, .. } => Some(*shown),
+            Picture::Spread { modules, .. } => Some(modules.iter().map(|(places, _)| places).sum()),
+            Picture::Circle { .. } | Picture::Arrow { .. } => None,
+        }
+    }
+}
+
 /// Why a report is a problem, drawn under its notes: the shape of what it
 /// found, at a size a reader takes in at once.
 #[derive(Debug, Clone, PartialEq, Eq)]

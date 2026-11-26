@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "end_to_end/allow.rs"]
+mod allow;
 #[path = "end_to_end/policy.rs"]
 mod policy;
 
@@ -444,7 +446,14 @@ fn the_allow_file_suppresses_only_existing_entries_and_notes_what_is_fixed() {
     let fixed = run(&workspace, &["--allow", allow]);
     assert_eq!(fixed.code, Some(0));
     assert!(fixed.stdout.contains("2 allowed entries"));
-    assert!(fixed.stdout.contains("now fixed"));
+    // As before ceilings: only stale entries, which an update takes out.
+    assert!(
+        fixed.stdout.contains(&format!(
+            "2 allowed entries in {allow} are now fixed (run `{TOOL} --update-allow {allow}` to tighten it)"
+        )),
+        "{}",
+        fixed.stdout
+    );
 
     let lib = workspace.join("src/lib.rs");
     let ring = "\npub mod ring {\n    pub struct A(pub Option<Box<B>>);\n    pub struct B(pub Option<Box<C>>);\n\

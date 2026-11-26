@@ -7,11 +7,28 @@ use std::fmt::Write;
 use std::io::IsTerminal;
 
 use crate::TOOL;
-use crate::lint::{Diagnostic, Lint};
+use crate::lint::Diagnostic;
+
+/// What `--prune-allow` would change in an allowlist, a line for each
+/// entry: what `--strict-allow` fails on.
+#[derive(Debug, Default)]
+pub struct Tighter {
+    /// Each entry that allows nothing, as written.
+    pub stale: Vec<String>,
+    /// Each entry whose ceiling is above what it allows, or that moved, and
+    /// how.
+    pub tightened: Vec<String>,
+}
+
+impl Tighter {
+    pub fn is_empty(&self) -> bool {
+        self.stale.is_empty() && self.tightened.is_empty()
+    }
+}
 
 pub fn render(
     diagnostics: &[Diagnostic],
-    stale_allowed: &[(Lint, String)],
+    tighter: &Tighter,
     allow_path: Option<&str>,
     strict_allow: bool,
 ) -> String {
@@ -42,7 +59,8 @@ pub fn render(
         out.push('\n');
     }
 
-    let fixed_allowed = stale_allowed.len();
+    let lines: Vec<&String> = tighter.stale.iter().chain(&tighter.tightened).collect();
+    let fixed_allowed = lines.len();
     if fixed_allowed > 0
         && let Some(path) = allow_path
     {
@@ -51,14 +69,20 @@ pub fn render(
         } else {
             "entries"
         };
+        // Only stale entries: what `--update-allow` takes out, too.
+        let (fixed, command) = if tighter.tightened.is_empty() {
+            ("are now fixed", "--update-allow")
+        } else {
+            ("are now fixed or allow less", "--prune-allow")
+        };
         if strict_allow {
             let _ = writeln!(
                 out,
-                "{}: {fixed_allowed} stale allowed {noun} in {path} (run `{TOOL} --update-allow {path}` to prune)",
+                "{}: {fixed_allowed} stale allowed {noun} in {path} (run `{TOOL} {command} {path}` to prune)",
                 paint.error("error[stale-allow]")
             );
-            for (lint, key) in stale_allowed.iter().take(20) {
-                let _ = writeln!(out, "  {} {} {key}", paint.gutter("-"), lint.name());
+            for line in lines.iter().take(20) {
+                let _ = writeln!(out, "  {} {line}", paint.gutter("-"));
             }
             if fixed_allowed > 20 {
                 let _ = writeln!(
@@ -71,7 +95,7 @@ pub fn render(
         } else {
             let _ = writeln!(
                 out,
-                "{} {fixed_allowed} allowed {noun} in {path} are now fixed (run `{TOOL} --update-allow {path}` to tighten it)",
+                "{} {fixed_allowed} allowed {noun} in {path} {fixed} (run `{TOOL} {command} {path}` to tighten it)",
                 paint.bold("note:")
             );
         }
@@ -87,6 +111,21 @@ pub fn render(
         let _ = writeln!(out, "{TOOL}: {}, well done!", paint.error(&count));
     }
     out
+}
+
+/// One `lint<TAB>key<TAB>file:line` line for each of `diagnostics`, with
+/// an empty place for one that has none.
+pub fn tsv(diagnostics: &[Diagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|diag| {
+            let at = diag
+                .location
+                .as_ref()
+                .map_or(String::new(), |loc| format!("{}:{}", loc.file, loc.line));
+            format!("{}\t{}\t{at}\n", diag.lint.name(), diag.key)
+        })
+        .collect()
 }
 
 /// Like cargo: `CARGO_TERM_COLOR=always|never` decides, then `NO_COLOR`, then

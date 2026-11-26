@@ -39,6 +39,45 @@ deslop-please --update-allow .deslop-please.allow
 deslop-please --allow .deslop-please.allow 
 ```
 
+The allowlist is a ratchet, not a rubber stamp. Each line allows one
+report, `<lint> <key>`, and may cap it and say why:
+
+```text
+# Comment lines just above an entry belong to it, and move with it.
+long-function core::plan::plan <= 609  # one walk over the plan; splitting it hides the order
+tangle core::a::X,core::b::Y          # settled: the two are one state machine
+over-public core::fixtures::* <= 12    # a group: up to 12 reports under this module
+```
+
+- `<= N` is a ceiling on what the report measures: the lines of a function,
+  the parameters of a signature, the modules a module uses, the places that
+  know a field. A report above it is an error, and no update raises it.
+  A circle (`tangle`, `module-cycle`, `duplicate-code`, `duplicate-struct`)
+  is allowed while its members are among the entry's.
+- `prefix::*` groups `over-public` or `test-only-pub` reports under a module,
+  and needs a ceiling on how many there are.
+- `--update-allow` writes the current reports into the file, keeping its
+  comments, reasons and ceilings, prints each entry it adds, and fails if a
+  report is above its ceiling. With `[allow] ceilings = true` it writes each
+  new entry with what it measures as its ceiling.
+- `--prune-allow` only takes out: entries that allow nothing, ceilings above
+  what they allow, and entries that moved. It adds nothing.
+- `--allow ... --strict-allow` fails on entries that allow nothing, ceilings
+  above what they allow, and entries that moved. A circle that shrank still
+  passes, though `--prune-allow` rewrites its key.
+- With a crate or module, `deslop-please my-crate --allow ...` and the other
+  allowlist flags read and change only the entries in its scope.
+- `--format tsv` prints `lint<TAB>key<TAB>file:line` for each report, the key
+  an entry needs.
+
+So that parallel branches add entries without conflicts, let git merge the
+file by union, in `.gitattributes`; `--strict-allow` and `--prune-allow` then
+catch an entry that a merge brings back:
+
+```text
+.deslop-please.allow merge=union
+```
+
 ### Configuration
 
 `deslop-please.toml` at the workspace's root tells the lints about the
@@ -133,6 +172,16 @@ simd = true
 [long-file]
 skip-test-modules = true # an inline `#[cfg(test)] mod tests { .. }` counts no lines
 skip-generated = true    # a file marked `@generated` in its first 5 lines is not measured
+
+[allow]
+ceilings = true     # `--update-allow` caps each new entry at what it measures
+# A stale entry allows a new report that nothing else does with its lint,
+# crate, last name and, for a member, type, or a circle no bigger that
+# shares most of its members: the same debt, moved. A file's or
+# directory's entry (`long-file`, `wide-directory`) follows no move.
+# `--prune-allow` rewrites the entry, keeping its reason, and
+# `--strict-allow` fails until then.
+follow-moves = true
 ```
 
 ### Add to your `AGENTS.md`

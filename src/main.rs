@@ -7,17 +7,20 @@ mod format;
 mod graph;
 mod indexing;
 mod lint;
+mod maintain;
 mod model;
 mod scip;
 mod settings;
 mod workspace;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use allow::AllowList;
 use configuration::Configuration;
+use maintain::Scoped;
 use model::Model;
 use workspace::Workspace;
 
@@ -42,7 +45,9 @@ struct Options {
     scope: Option<String>,
     allow: Option<PathBuf>,
     update_allow: Option<PathBuf>,
+    prune_allow: Option<PathBuf>,
     strict_allow: bool,
+    tsv: bool,
     configuration: Configuration,
 }
 
@@ -50,8 +55,8 @@ fn usage() -> String {
     format!(
         "\
 usage: {TOOL} [crate_or_mod] [--allow <path>] [--strict-allow] [--update-allow <path>]
-       [--target <triple>] [-F, --features <features>] [--all-features]
-       [--no-default-features]
+       [--prune-allow <path>] [--format <human|tsv>] [--target <triple>]
+       [-F, --features <features>] [--all-features] [--no-default-features]
 
 Runs architectural lints (module-cycle, tangle, field-leak, shared-mutable-bag,
 shallow-module, wide-type, wide-module, wide-struct, wide-enum, scattered-impl,
@@ -63,8 +68,19 @@ layer-violation, unused-dep, wide-directory, long-file) on the Cargo workspace.
 options:
   <crate_or_mod>               check only one crate or module (e.g. my-crate)
   --allow <path>               suppress listed existing debt; new errors still fail
-  --strict-allow               fail if `--allow` contains stale (already-fixed) entries
-  --update-allow <path>        write current diagnostics to <path>
+  --strict-allow               fail if `--allow` has entries that allow nothing,
+                               ceilings above what they allow, or entries that
+                               moved; a circle that shrank still passes
+  --update-allow <path>        write current diagnostics to <path>, keeping its
+                               comments, reasons and ceilings; prints what it adds
+                               and fails if a diagnostic is above its ceiling
+  --prune-allow <path>         remove the entries of <path> that allow nothing,
+                               lower its ceilings to what they allow, and rewrite
+                               moved entries; adds nothing
+  --format <human|tsv>         print reports for people (default) or one
+                               `lint<TAB>key<TAB>file:line` line each
+
+With a crate or module, the allowlist flags read and change only its entries.
 
 configuration, as `cargo check --workspace` takes it:
   --target <triple>            check for the target triple, not the host's
@@ -85,10 +101,12 @@ A flag's value is the next word, or follows `=`: `--target=<triple>`.
 }
 
 /// The flags, and whether each takes a value. `-F` is `--features`.
-const FLAGS: [(&str, bool); 7] = [
+const FLAGS: [(&str, bool); 9] = [
     ("--allow", true),
     ("--strict-allow", false),
     ("--update-allow", true),
+    ("--prune-allow", true),
+    ("--format", true),
     ("--target", true),
     ("--features", true),
     ("--all-features", false),
@@ -104,7 +122,9 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, Error> {
         scope: None,
         allow: None,
         update_allow: None,
+        prune_allow: None,
         strict_allow: false,
+        tsv: false,
         configuration: Configuration::default(),
     };
     let mut given = Vec::new();
@@ -141,6 +161,18 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, Error> {
             "--allow" => options.allow = Some(PathBuf::from(value)),
             "--strict-allow" => options.strict_allow = true,
             "--update-allow" => options.update_allow = Some(PathBuf::from(value)),
+            "--prune-allow" => options.prune_allow = Some(PathBuf::from(value)),
+            "--format" => {
+                options.tsv = match value {
+                    "human" => false,
+                    "tsv" => true,
+                    _ => {
+                        return Err(Error::new(format!(
+                            "'--format' is human or tsv, not '{value}'"
+                        )));
+                    }
+                }
+            }
             "--target" => configuration.target(value)?,
             "--features" => configuration.features(value),
             "--all-features" => configuration.all_features(),
@@ -148,9 +180,10 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, Error> {
             _ => unreachable!("{flag} has no meaning"),
         }
     }
-    if options.allow.is_some() && options.update_allow.is_some() {
+    let allowlists = [&options.allow, &options.update_allow, &options.prune_allow];
+    if allowlists.iter().filter(|path| path.is_some()).count() > 1 {
         return Err(Error::new(
-            "'--allow' and '--update-allow' cannot be given together",
+            "only one of '--allow', '--update-allow' and '--prune-allow' may be given",
         ));
     }
     if options.strict_allow && options.allow.is_none() {
@@ -209,35 +242,57 @@ fn run(options: Options) -> Result<bool, Error> {
         ),
         None => None,
     };
-    let all = lint::check(&model, scope);
+    // The allowlist is the whole workspace's: a scoped run reads and
+    // changes only the entries in its scope.
+    let all = lint::check(&model, None);
+    let shown: BTreeSet<(lint::Lint, String)> = lint::check(&model, scope)
+        .into_iter()
+        .map(|d| (d.lint, d.key))
+        .collect();
+    let scoped = Scoped {
+        all: &all,
+        shown: &shown,
+        prefix: scope.map(|node| format!("{}::", model.tree.display(node))),
+    };
+    let settings = &model.settings.allow;
 
-    if let Some(path) = options.update_allow {
-        let allow = AllowList::from_diagnostics(&all);
-        allow.write(&path)?;
-        eprintln!("{TOOL}: wrote {} entries to {}", all.len(), path.display());
-        return Ok(true);
+    if let Some(path) = &options.update_allow {
+        return maintain::update(path, &scoped, settings);
+    }
+    if let Some(path) = &options.prune_allow {
+        return maintain::prune(path, &scoped, settings);
     }
 
-    let (reported, stale_allowed, allow_shown) = match &options.allow {
+    let (reported, tighter) = match &options.allow {
         Some(path) => {
             let allow = AllowList::read(path)?;
-            let stale = allow.stale(&all);
-            let active: Vec<_> = all.into_iter().filter(|d| !allow.is_allowed(d)).collect();
-            (active, stale, Some(path.display().to_string()))
+            let audit = allow.audit(&all, settings.follow_moves);
+            let reported = scoped.reported(&allow, &audit, path);
+            (reported, maintain::tighter(&allow, &audit, &scoped))
         }
-        None => (all, Vec::new(), None),
+        None => (
+            all.iter().filter(|d| scoped.shows(d)).cloned().collect(),
+            format::Tighter::default(),
+        ),
     };
-
-    print!(
-        "{}",
-        format::render(
-            &reported,
-            &stale_allowed,
-            allow_shown.as_deref(),
-            options.strict_allow,
-        )
-    );
-    Ok(reported.is_empty() && (!options.strict_allow || stale_allowed.is_empty()))
+    let allow_shown = options
+        .allow
+        .as_ref()
+        .map(|path| path.display().to_string());
+    if options.tsv {
+        print!("{}", format::tsv(&reported));
+    } else {
+        print!(
+            "{}",
+            format::render(
+                &reported,
+                &tighter,
+                allow_shown.as_deref(),
+                options.strict_allow,
+            )
+        );
+    }
+    Ok(reported.is_empty() && (!options.strict_allow || tighter.is_empty()))
 }
 
 fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Model, Error> {
