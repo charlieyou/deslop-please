@@ -347,6 +347,25 @@ pub fn collect_idents(text: &str, tokens: &[Token]) -> HashSet<String> {
         .collect()
 }
 
+/// The lines that `tokens` of `text` cover: the lines that hold code, from
+/// the first token to the last, and not those blank or only a comment.
+pub fn code_lines(text: &str, tokens: &[Token]) -> u32 {
+    let mut count = 0;
+    let mut line = 0;
+    let mut at = 0;
+    let mut counted = None;
+    for token in tokens {
+        line += text[at..token.start].matches('\n').count();
+        let last = line + text[token.start..token.end].matches('\n').count();
+        let first = counted.map_or(line, |counted: usize| line.max(counted + 1));
+        count += (last + 1).saturating_sub(first);
+        counted = Some(last);
+        line = last;
+        at = token.end;
+    }
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
 /// Checks a function's parameter list for positional argument-swap hazards:
 /// 2+ `bool` parameters, or 4+ consecutive parameters of the same primitive type.
 pub fn positional_trap(text: &str, param_tokens: &[Token]) -> Option<PositionalTrap> {
@@ -438,6 +457,12 @@ fn param_primitive(text: &str, param: &[Token]) -> Option<Option<&'static str>> 
 mod tests {
     use super::*;
     use crate::model::from_index::source::tokens;
+
+    #[test]
+    fn code_lines_leave_out_blank_and_comment_lines() {
+        let text = "pub fn f() {\n\n    // note\n    let a = \"/*\"; // trailing\n    /* block\n    still */ let b = 2;\n    /* only */\n    let c = \"two\n lines\";\n}";
+        assert_eq!(code_lines(text, &tokens::read(text)), 6);
+    }
 
     #[test]
     fn detects_result_with_string_error() {

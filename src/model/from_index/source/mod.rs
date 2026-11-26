@@ -468,14 +468,22 @@ impl Source {
             None => (0, None, false),
         };
 
-        let last_line = if item.end.column == 0 {
-            item.end.line
-        } else {
-            item.end.line + 1
-        };
+        // From the first token past the attributes: doc comments are
+        // comments, which are no tokens.
+        let mut start = 0;
+        while self.is(tokens[start], "#") {
+            let Some(close) = tokens
+                .get(start + 1)
+                .filter(|t| self.is(**t, "["))
+                .and_then(|_| self.matching_in(tokens, start + 1))
+            else {
+                break;
+            };
+            start = close + 1;
+        }
         Some((
             FunctionMetrics {
-                lines: last_line.saturating_sub(item.start.line),
+                lines: metrics::code_lines(&self.text, &tokens[start..=last]),
                 branches,
                 params,
                 returns_string_error,

@@ -8,7 +8,8 @@ use super::{
 use crate::graph::Graph;
 use crate::model::{ItemId, ItemKind, Model, NodeId, PositionalTrap};
 
-/// The most lines one non-test function may span before it wants splitting.
+/// The most lines of code, from `fn` to its closing brace, that one non-test
+/// function may hold before it wants splitting.
 const MOST_LINES: usize = 150;
 
 /// The most branching points (`if`, `match`, loops, `&&`, `||`) in one

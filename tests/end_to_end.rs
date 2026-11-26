@@ -1729,3 +1729,43 @@ pub struct SeatC { pub cards: [u8; 2], pub seat: usize, pub stack: u32, pub pot:
         ["duplicate-struct dups::SeatA,dups::SeatB"]
     );
 }
+
+#[test]
+fn a_function_is_as_long_as_its_code_lines_not_its_docs_attributes_or_comments() {
+    let body = |lines: usize| -> String {
+        (0..lines)
+            .map(|at| format!("    let _v{at} = {at};\n"))
+            .collect()
+    };
+    let docs: String = (0..40)
+        .map(|at| format!("/// Line {at} of the docs.\n"))
+        .collect();
+    let mut lib = String::from("//! Lengths.\n");
+    // 150 lines of code with the `fn` line and the `}`: at the limit.
+    lib += &docs;
+    lib += "#[expect(clippy::too_many_lines, reason = \"a fixture\")]\npub fn at_limit() {\n";
+    for chunk in 0..4 {
+        lib += &body(37);
+        lib += &format!("\n    // Chunk {chunk} ends.\n    /* and a block\n       comment */\n\n");
+    }
+    lib += "}\n";
+    // 151 lines of code: one over.
+    lib += "pub fn over_limit() {\n";
+    lib += &body(149);
+    lib += "}\n";
+    let workspace = scratch_workspace(
+        "long_function_code_lines",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"lengths\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+        ],
+    );
+    let found: Vec<String> = keys(&workspace)
+        .into_iter()
+        .filter(|key| key.starts_with("long-function"))
+        .collect();
+    assert_eq!(found, ["long-function lengths::over_limit"]);
+}
