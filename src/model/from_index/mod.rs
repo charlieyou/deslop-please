@@ -18,7 +18,7 @@ use crate::model::{
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
 use blocks::Blocks;
-use source::{Access, ImplBlock, Plain, PubUse, Source, TextPath};
+use source::{Access, ImplBlock, Macros, Plain, PubUse, Source, TextPath};
 
 /// The model of `workspace` from its `index`, with `consumed`, what its
 /// consumers use of it: each symbol, and whether test code uses it.
@@ -112,6 +112,7 @@ struct Unit<'a> {
     reexports: Vec<Reexport>,
     /// Paths it writes as text, where.
     mentions: Vec<TextPath>,
+    macros: Macros,
 }
 
 impl<'a> Builder<'a> {
@@ -440,6 +441,7 @@ impl<'a> Builder<'a> {
             idents: HashSet::new(),
             reexports: Vec::new(),
             mentions: Vec::new(),
+            macros: Macros::default(),
         };
         let scan = unit.source.scan_file();
         let mut scip_packages = HashSet::new();
@@ -455,6 +457,7 @@ impl<'a> Builder<'a> {
         unit.scip_packages = scip_packages;
         unit.idents = scan.idents;
         unit.mentions = scan.mentions;
+        unit.macros = scan.macros;
         self.units.push(unit);
         Ok(())
     }
@@ -872,18 +875,24 @@ impl<'a> Builder<'a> {
                     .innermost(block.block)
                     .unwrap_or(file.module);
                 let test = file.test || self.tree.is_test(owner);
-                let local_self = block.self_type.is_some_and(|self_range| {
-                    unit.document
+                let self_package = block.self_type.and_then(|self_range| {
+                    let occurrence = unit
+                        .document
                         .occurrences
                         .iter()
-                        .find(|o| !o.definition && o.range == self_range)
-                        .is_some_and(|o| matches!(self.symbols.get(o.symbol), Some(Named::Item(_))))
+                        .find(|o| !o.definition && o.range == self_range)?;
+                    match self.symbols.get(occurrence.symbol) {
+                        Some(&Named::Item(ty)) => {
+                            self.tree.package_of(self.items[ty.index()].owner)
+                        }
+                        _ => None,
+                    }
                 });
                 explicit_spans.insert((unit.file, block.block));
                 by_trait.entry(trait_id).or_default().push(TraitImpl {
                     owner,
                     test,
-                    local_self,
+                    self_package,
                 });
             }
         }
@@ -926,7 +935,9 @@ impl<'a> Builder<'a> {
             let item = &self.items[id.index()];
             let test = item.file.is_some_and(|f| self.files[f.index()].test)
                 || self.tree.is_test(item.owner);
-            let local_self = item.parent.is_some();
+            let self_package = item
+                .parent
+                .and_then(|ty| self.tree.package_of(self.items[ty.index()].owner));
             if let Some(candidates) = trait_by_name.get(trait_name) {
                 let chosen = match candidates.as_slice() {
                     [only] => Some(*only),
@@ -941,13 +952,52 @@ impl<'a> Builder<'a> {
                     by_trait.entry(trait_id).or_default().push(TraitImpl {
                         owner: item.owner,
                         test,
-                        local_self,
+                        self_package,
                     });
                 }
             }
         }
 
+        self.add_macro_trait_impls(&trait_by_name, &mut by_trait);
         by_trait
+    }
+
+    /// Adds an `impl` for each invocation of a `macro_rules!` whose body
+    /// writes `impl Trait for`, in its package, of a trait of that package
+    /// by that name. The index shows none of them.
+    fn add_macro_trait_impls(
+        &self,
+        trait_by_name: &HashMap<&str, Vec<ItemId>>,
+        by_trait: &mut HashMap<ItemId, Vec<TraitImpl>>,
+    ) {
+        for unit in &self.units {
+            let file = &self.files[unit.file.index()];
+            let package = self.tree.package_of(file.module);
+            for (name, trait_name) in &unit.macros.impls {
+                let Some(&trait_id) = trait_by_name.get(trait_name.as_str()).and_then(|ids| {
+                    ids.iter()
+                        .find(|&&t| self.tree.package_of(self.items[t.index()].owner) == package)
+                }) else {
+                    continue;
+                };
+                for other in &self.units {
+                    let other_file = &self.files[other.file.index()];
+                    if self.tree.package_of(other_file.module) != package {
+                        continue;
+                    }
+                    let invocations = other.macros.invoked.iter().filter(|&n| n == name);
+                    let test = other_file.test || self.tree.is_test(other_file.module);
+                    by_trait
+                        .entry(trait_id)
+                        .or_default()
+                        .extend(invocations.map(|_| TraitImpl {
+                            owner: other_file.module,
+                            test,
+                            self_package: package,
+                        }));
+                }
+            }
+        }
     }
 
     fn module(&mut self, symbol: &Symbol, path: &[&str]) -> Option<NodeId> {

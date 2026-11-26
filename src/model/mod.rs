@@ -44,14 +44,16 @@ pub struct Model {
     pub trait_impls: HashMap<ItemId, Vec<TraitImpl>>,
 }
 
-/// One `impl Trait for Type` block observed in the workspace.
+/// One `impl Trait for Type` block observed in the workspace, or one that a
+/// macro of the workspace's writes for each invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraitImpl {
     pub owner: NodeId,
     pub test: bool,
-    /// True when `Type` is a concrete workspace type (false for std/external
-    /// extension traits and blanket `impl<T> Trait for T`).
-    pub local_self: bool,
+    /// The package of `Type` when it is a concrete workspace type; `None`
+    /// for a type outside the workspace and a blanket `impl<T> Trait for T`.
+    /// A macro's `impl` counts as for a type of its own package.
+    pub self_package: Option<NodeId>,
 }
 
 /// Normalized structural fingerprint of a function body for clone detection.

@@ -64,6 +64,19 @@ pub struct FileScan {
     pub idents: HashSet<String>,
     /// Paths written as text, where: in serde attributes and format strings.
     pub mentions: Vec<TextPath>,
+    /// The traits that each `macro_rules!` writes an `impl` of, by the
+    /// macro's name, and every macro invocation's name.
+    pub macros: Macros,
+}
+
+/// What a file's `macro_rules!` definitions implement, and what it invokes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Macros {
+    /// By macro: each trait, by its last name, that its body writes
+    /// `impl Trait for` of.
+    pub impls: Vec<(String, String)>,
+    /// The name of each macro invoked, once per invocation.
+    pub invoked: Vec<String>,
 }
 
 /// Parsed pieces of an `impl` block header before its `{`.
@@ -204,7 +217,67 @@ impl Source {
             pub_uses,
             idents,
             mentions: self.mentions(),
+            macros: self.macros(),
         }
+    }
+
+    fn macros(&self) -> Macros {
+        let tokens = &self.tokens;
+        let mut macros = Macros::default();
+        for (at, token) in tokens.iter().enumerate() {
+            let bang = tokens.get(at + 1).is_some_and(|t| self.is(*t, "!"));
+            if token.kind != Kind::Ident || !bang {
+                continue;
+            }
+            let defines = self.is(*token, "macro_rules");
+            match tokens.get(at + 2) {
+                Some(name) if defines && name.kind == Kind::Ident => {
+                    let Some(close) = tokens
+                        .get(at + 3)
+                        .filter(|t| t.kind == Kind::Open)
+                        .and_then(|_| self.matching(at + 3))
+                    else {
+                        continue;
+                    };
+                    let body = &tokens[at + 3..close];
+                    for (index, word) in body.iter().enumerate() {
+                        if !self.is(*word, "impl") {
+                            continue;
+                        }
+                        let header = body[index + 1..]
+                            .iter()
+                            .take_while(|t| !self.is(**t, "{") && !self.is(**t, ";"));
+                        let before_for: Vec<&Token> =
+                            header.take_while(|t| !self.is(**t, "for")).collect();
+                        let has_for = body
+                            .get(index + 1 + before_for.len())
+                            .is_some_and(|t| self.is(*t, "for"));
+                        // The trait's name: its last outside generic arguments.
+                        let mut depth = 0;
+                        let mut named = None;
+                        for &part in &before_for {
+                            match self.text(*part) {
+                                "<" => depth += 1,
+                                ">" => depth -= 1,
+                                _ if depth == 0 && part.kind == Kind::Ident => named = Some(part),
+                                _ => {}
+                            }
+                        }
+                        if let Some(name_of_trait) = named.filter(|_| has_for) {
+                            macros.impls.push((
+                                self.text(*name).to_owned(),
+                                self.text(*name_of_trait).to_owned(),
+                            ));
+                        }
+                    }
+                }
+                Some(open) if !defines && open.kind == Kind::Open => {
+                    macros.invoked.push(self.text(*token).to_owned());
+                }
+                _ => {}
+            }
+        }
+        macros
     }
 
     /// How the name at `name` is written, inside the definition `holder` of

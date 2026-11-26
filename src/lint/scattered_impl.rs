@@ -168,9 +168,13 @@ fn check_single_impl_traits(model: &Model, scope: Option<NodeId>) -> Vec<Diagnos
             continue;
         }
         let impls = model.trait_impls.get(&id).map(Vec::as_slice).unwrap_or(&[]);
-        // Extension traits on std/external types or blanket `impl<T> Trait for T`
-        // legitimately have a single impl block.
-        if impls.iter().any(|im| !im.local_self) {
+        // An extension trait, for a type of another crate or for any type,
+        // and a seam that a crate above implements, legitimately have one
+        // `impl` block.
+        if impls
+            .iter()
+            .any(|im| im.self_package != Some(pkg) || tree.package_of(im.owner) != Some(pkg))
+        {
             continue;
         }
         if impls.len() > 1 {
@@ -248,7 +252,7 @@ mod tests {
             vec![crate::model::TraitImpl {
                 owner: m,
                 test: false,
-                local_self: true,
+                self_package: Some(pkg),
             }],
         );
         sample.model.trait_impls.insert(
@@ -256,7 +260,7 @@ mod tests {
             vec![crate::model::TraitImpl {
                 owner: m,
                 test: false,
-                local_self: false,
+                self_package: None,
             }],
         );
         sample.model.trait_impls.insert(
@@ -265,12 +269,12 @@ mod tests {
                 crate::model::TraitImpl {
                     owner: m,
                     test: false,
-                    local_self: true,
+                    self_package: Some(pkg),
                 },
                 crate::model::TraitImpl {
                     owner: m,
                     test: true,
-                    local_self: true,
+                    self_package: Some(pkg),
                 },
             ],
         );

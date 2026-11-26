@@ -1638,3 +1638,66 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
         ]
     );
 }
+
+#[test]
+fn a_single_impl_in_a_crate_above_for_another_crates_type_or_from_a_macro_is_legitimate() {
+    let base = "\
+pub struct Thing(pub u32);
+pub trait Seam { fn run(&self) -> u32; }
+pub trait Solo { fn solo(&self) -> u32; }
+impl Solo for Thing { fn solo(&self) -> u32 { self.0 } }
+pub trait Kernel { fn k() -> u32; }
+macro_rules! kernel {
+    ($t:ty) => { impl Kernel for $t { fn k() -> u32 { 1 } } };
+}
+kernel!(u8);
+kernel!(u16);
+pub trait Once { fn once() -> u32; }
+macro_rules! once {
+    ($t:ty) => { impl Once for $t { fn once() -> u32 { 2 } } };
+}
+once!(u8);
+pub fn all(seam: &dyn Seam) -> u32 {
+    seam.run() + Thing(1).solo() + <u8 as Kernel>::k() + <u16 as Kernel>::k() + <u8 as Once>::once()
+}
+";
+    let top = "\
+pub struct Engine;
+impl base::Seam for Engine { fn run(&self) -> u32 { 3 } }
+trait Ext { fn twice(&self) -> u32; }
+impl Ext for base::Thing { fn twice(&self) -> u32 { self.0 * 2 } }
+fn main() { let _ = base::all(&Engine) + base::Thing(2).twice(); }
+";
+    let workspace = scratch_workspace(
+        "single_impl_seams",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"base\", \"top\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "base/Cargo.toml",
+                "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+            ),
+            ("base/src/lib.rs", base),
+            (
+                "top/Cargo.toml",
+                "[package]\nname = \"top\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+                 [dependencies]\nbase = { path = \"../base\" }\n",
+            ),
+            ("top/src/main.rs", top),
+        ],
+    );
+    let found: Vec<String> = keys(&workspace)
+        .into_iter()
+        .filter(|key| key.starts_with("single-impl-trait"))
+        .collect();
+    // `kernel!` writes two impls of `Kernel`; `once!` writes one of `Once`.
+    assert_eq!(
+        found,
+        [
+            "single-impl-trait base::Once",
+            "single-impl-trait base::Solo"
+        ]
+    );
+}
