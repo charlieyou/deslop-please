@@ -37,25 +37,27 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         };
         let owner_item = &model.items[graph.things[owner_thing.index()].item.index()];
         let caller_mod = model.references[usage.reference].from;
-        if owner_item.kind == ItemKind::Type {
-            if usage.user != Some(owner_thing) {
-                let entry = shown.entry(owner_thing).or_default();
-                entry.0.insert(usage.item);
-                entry.1.insert(caller_mod);
-            }
+        let ty = if owner_item.kind == ItemKind::Type {
+            owner_thing
         } else if graph.things[owner_thing.index()].item == usage.item
             && let Some(param_ty) = model.items[usage.item.index()].first_param_type
             && let Some(ty) = graph.thing_of[param_ty.index()]
+            && graph.things[ty.index()].home == graph.things[owner_thing.index()].home
         {
-            let fn_home = graph.things[owner_thing.index()].home;
-            if graph.things[ty.index()].home == fn_home
-                && usage.user != Some(ty)
-                && usage.user != Some(owner_thing)
-            {
-                let entry = shown.entry(ty).or_default();
-                entry.0.insert(usage.item);
-                entry.1.insert(caller_mod);
-            }
+            ty
+        } else {
+            continue;
+        };
+        // Outsiders are outside the type and its home module, as for
+        // `wide-module`: the module's own code may use all of it, but its
+        // submodules are modules of their own.
+        if caller_mod != graph.things[ty.index()].home
+            && usage.user != Some(ty)
+            && usage.user != Some(owner_thing)
+        {
+            let entry = shown.entry(ty).or_default();
+            entry.0.insert(usage.item);
+            entry.1.insert(caller_mod);
         }
     }
 

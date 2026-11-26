@@ -1769,3 +1769,50 @@ fn a_function_is_as_long_as_its_code_lines_not_its_docs_attributes_or_comments()
         .collect();
     assert_eq!(found, ["long-function lengths::over_limit"]);
 }
+
+#[test]
+fn a_type_is_wide_by_what_code_outside_its_module_uses_and_a_submodule_is_outside() {
+    let methods = |ty: &str| -> String {
+        let mut text = format!("pub struct {ty} {{ base: u32 }}\nimpl {ty} {{\n");
+        for at in 1..=16 {
+            text += &format!("    pub fn m{at}(&self) -> u32 {{ self.base * {at} + 1 }}\n");
+        }
+        text + "}\n"
+    };
+    let calls =
+        |value: &str| -> String { (1..=16).map(|at| format!(" + {value}.m{at}()")).collect() };
+    // `Busy` is used in full only by its own module; `Open` by a submodule.
+    let store = format!(
+        "pub mod child;\n{}{}pub fn tally(busy: &Busy) -> u32 {{ 0{} }}\n",
+        methods("Busy"),
+        methods("Open"),
+        calls("busy"),
+    );
+    let child = format!(
+        "pub fn total(open: &super::Open) -> u32 {{ 0{} }}\n",
+        calls("open")
+    );
+    let lib = "//! Types.\nmod store;\n\
+               pub fn drive() -> u32 {\n\
+                   let busy = store::Busy { base: 1 };\n\
+                   let open = store::Open { base: 2 };\n\
+                   store::tally(&busy) + busy.m1() + busy.m2() + store::child::total(&open)\n\
+               }\n";
+    let workspace = scratch_workspace(
+        "wide_type_outside_home",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"wide\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+            ("src/store.rs", &store),
+            ("src/store/child.rs", &child),
+        ],
+    );
+    let found: Vec<String> = keys(&workspace)
+        .into_iter()
+        .filter(|key| key.starts_with("wide-type"))
+        .collect();
+    assert_eq!(found, ["wide-type wide::store::Open"]);
+}
