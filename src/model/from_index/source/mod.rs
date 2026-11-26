@@ -88,7 +88,7 @@ pub struct MacroBody {
     pub range: Range,
     /// The types it writes `impl X` or `impl Trait for X` of.
     pub types: Vec<String>,
-    /// Every name it writes.
+    /// The names of members it uses: see [`Source::used_names`].
     pub names: HashSet<String>,
 }
 
@@ -255,15 +255,17 @@ impl Source {
                     let body = &tokens[at + 3..close];
                     let mut written = MacroBody {
                         range: self.range(tokens[at].start, tokens[close].end),
-                        names: body
-                            .iter()
-                            .filter(|t| t.kind == Kind::Ident)
-                            .map(|t| self.text(*t).to_owned())
-                            .collect(),
+                        names: self.used_names(body),
                         types: Vec::new(),
                     };
                     for (index, word) in body.iter().enumerate() {
-                        if !self.is(*word, "impl") {
+                        // An `impl` that starts an item, not `x: impl Trait`.
+                        let item = index == 0
+                            || !matches!(
+                                self.text(body[index - 1]),
+                                ":" | "->" | "(" | "," | "&" | "<"
+                            );
+                        if !self.is(*word, "impl") || !item {
                             continue;
                         }
                         let header = body[index + 1..]
@@ -308,7 +310,11 @@ impl Source {
                                 _ => {}
                             }
                         }
-                        written.types.extend(named.map(|t| self.text(t).to_owned()));
+                        if let Some(named) = named.map(|t| self.text(t).to_owned())
+                            && !written.types.contains(&named)
+                        {
+                            written.types.push(named);
+                        }
                     }
                     macros.bodies.push(written);
                 }
@@ -319,6 +325,42 @@ impl Source {
             }
         }
         macros
+    }
+
+    /// The names of members that `body` uses: after `.` or `::`, as
+    /// `self.cells` and `Self::new` are, and the fields of a struct literal
+    /// or pattern, `Self { cells: .., shift }`. Names it defines, `fn new`,
+    /// are none of them.
+    fn used_names(&self, body: &[Token]) -> HashSet<String> {
+        let mut names = HashSet::new();
+        // By open bracket, whether it opens a struct literal: `Self {`, `Row {`.
+        let mut literal: Vec<bool> = Vec::new();
+        for (at, token) in body.iter().enumerate() {
+            let text = |at: usize| body.get(at).map(|t| self.text(*t));
+            match token.kind {
+                Kind::Open => {
+                    let opener = at.checked_sub(1).and_then(text).unwrap_or_default();
+                    let typed =
+                        opener == "Self" || opener.starts_with(|c: char| c.is_ascii_uppercase());
+                    literal.push(self.is(*token, "{") && typed);
+                }
+                Kind::Close => {
+                    literal.pop();
+                }
+                Kind::Ident => {
+                    let before = at.checked_sub(1).and_then(text);
+                    let member = matches!(before, Some("." | "::"));
+                    let field = literal.last() == Some(&true)
+                        && matches!(before, Some("{" | ","))
+                        && matches!(text(at + 1), Some(":" | "," | "}"));
+                    if member || field {
+                        names.insert(self.text(*token).to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
     }
 
     /// How the name at `name` is written, inside the definition `holder` of

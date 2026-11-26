@@ -1595,7 +1595,8 @@ pub mod glob { use crate::prelude::{self, *}; pub fn top() -> String { format!(\
 pub mod named { use crate::limits::MAX; const MIN: u32 = 1; pub fn f() -> String { format!(\"{MAX}{MIN}\") } }
 pub struct Row { pub cells: Vec<u32>, pub shift: u8 }
 pub struct Other { pub cells: Vec<u32> }
-macro_rules! row { () => { impl Row { pub fn new() -> Self { Self { cells: Vec::new(), shift: 0 } } } }; }
+impl Row { pub fn wipe(&mut self) { self.shift = 0; } }
+macro_rules! row { () => { impl Row { pub fn new() -> Self { let wipe = 0; Self { cells: Vec::new(), shift: wipe } } } }; }
 row!();
 ";
     let main = "\
@@ -1640,7 +1641,8 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
     // `{width:>3}` captures the argument `width`, no function: only a
     // value can be captured, and `{WIDE}` only its own module's constant.
     // A glob brings in what its module re-exports; `use limits::MAX` no `MIN`.
-    // `row!`'s body uses the fields of `Row`, which it implements, not `Other`'s.
+    // `row!`'s body uses the fields of `Row`, which it implements, not `Other`'s,
+    // and a local named `wipe` is no use of `Row::wipe`.
     assert_eq!(
         keys(&workspace),
         [
@@ -1651,6 +1653,7 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
             "over-public core_t::limits::TOP",
             "over-public core_t::shown::WIDE",
             "unused-pub core_t::Other",
+            "unused-pub core_t::Row::wipe",
             "unused-pub core_t::hidden",
             "unused-pub core_t::hidden::WIDE",
             "unused-pub core_t::limits::MIN",

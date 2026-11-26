@@ -281,8 +281,10 @@ impl<'a> Builder<'a> {
 
     /// What `macro_rules!` bodies use, which the index sees no reference to:
     /// a field or method of a type of its crate that a body writes an `impl`
-    /// block of, named in that body, as `Self { numerators, .. }` in
-    /// `impl AverageRow<$atomic> { .. }`. Each is used where the body is.
+    /// block of, used in that body, as `Self { numerators, .. }` in
+    /// `impl AverageRow<$atomic> { .. }`. Each is used where the body is. Of
+    /// types of that name, those of the body's file are meant when there are
+    /// any.
     fn macro_mentions(&self) -> Vec<Mention> {
         // By its package and type's last name, each member of a type.
         let mut members: HashMap<(Option<NodeId>, &str), Vec<ItemId>> = HashMap::new();
@@ -313,7 +315,19 @@ impl<'a> Builder<'a> {
                 let named = body
                     .types
                     .iter()
-                    .flat_map(|ty| members.get(&(package, ty.as_str())).into_iter().flatten())
+                    .flat_map(|ty| {
+                        let all = members
+                            .get(&(package, ty.as_str()))
+                            .map_or(&[][..], Vec::as_slice);
+                        let parent_file = |item: &ItemId| {
+                            self.items[item.index()]
+                                .parent
+                                .and_then(|parent| self.items[parent.index()].file)
+                        };
+                        let here = all.iter().any(|item| parent_file(item) == Some(unit.file));
+                        all.iter()
+                            .filter(move |item| !here || parent_file(item) == Some(unit.file))
+                    })
                     .filter(|item| {
                         let name = &self.items[item.index()].name;
                         body.names
