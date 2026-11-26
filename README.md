@@ -129,6 +129,7 @@ positional-trap = "bools" # report bool flags only, not runs of numbers; default
 [test-only-pub]
 crates = ["core", "ids"]
 external-tests = "justify" # tests of other packages, of `tests/` and `benches/`, and consumers', for `pub`
+                           # "own-package": only the package's own `tests/` and `benches/`
 crate-tests = "justify"    # tests elsewhere in the crate, for `pub(crate)`
 
 # Where `Result<_, String>` is fine. By default no function may return it.

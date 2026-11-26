@@ -168,7 +168,8 @@ pub struct TestOnlyPub {
     /// others every test use is reported as today.
     pub crates: Vec<String>,
     /// Tests in other packages, in the crate's own `tests/` and `benches/`,
-    /// and a consumer's tests, for a `pub` item.
+    /// and a consumer's tests, for a `pub` item. `own-package` takes only
+    /// the package's own `tests/` and `benches/`.
     pub external_tests: TestUse,
     /// Tests elsewhere in the crate, for a `pub(crate)` item.
     pub crate_tests: TestUse,
@@ -183,6 +184,9 @@ pub enum TestUse {
     Report,
     /// It justifies the visibility, when the item has a production use too.
     Justify,
+    /// For `external-tests`: as `justify`, for tests in the package's own
+    /// `tests/` and `benches/` only, not another package's or a consumer's.
+    OwnPackage,
 }
 
 /// Whether `names`, package names such as `solver-core` or crate names such
@@ -290,6 +294,11 @@ impl Settings {
 
     fn parse(text: &str) -> Result<Settings, Error> {
         let settings: Settings = toml::from_str(text).map_err(|e| Error::new(e.to_string()))?;
+        if settings.test_only_pub.crate_tests == TestUse::OwnPackage {
+            return Err(Error::new(
+                "`test-only-pub.crate-tests` takes `report` or `justify`; `own-package` is for `external-tests`",
+            ));
+        }
         if let Some(name) = settings
             .high_fan_out
             .most_by_layer

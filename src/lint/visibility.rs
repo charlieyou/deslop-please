@@ -25,6 +25,9 @@ struct Usage {
     prod_external_to_lib: bool,
     /// Test usage by another package or test/bench target (`tests/`, `benches/`).
     test_external_to_lib: bool,
+    /// Test usage by another target of the item's own package: `tests/`,
+    /// `benches/`.
+    test_own_target: bool,
     /// Non-test usage outside the item's own home module subtree within the same target.
     prod_outside_home: bool,
     /// Test usage outside the item's own home module subtree.
@@ -34,7 +37,7 @@ struct Usage {
 
 struct AccessSite {
     test: bool,
-    external: bool,
+    reach: Reach,
     outside_home: bool,
     from: NodeId,
 }
@@ -219,7 +222,7 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
         let target_file_target = target_item.file.and_then(|f| model.files[f.index()].target);
         let ref_file = &model.files[reference.file.index()];
         let ref_pkg = tree.package_of(ref_file.module);
-        let external = ref_pkg != target_pkg || ref_file.target != Some(TargetKind::Library);
+        let external = reach(ref_pkg, target_pkg, ref_file.target);
         let same_target = ref_pkg == target_pkg && ref_file.target == target_file_target;
 
         // Item-level usage (ignore direct self-recursion).
@@ -232,7 +235,7 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
                 &mut item_usage[target.index()],
                 AccessSite {
                     test: reference.test,
-                    external,
+                    reach: external,
                     outside_home,
                     from: reference.from,
                 },
@@ -247,12 +250,12 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
                     }
                     let mod_outside =
                         !same_target || is_outside_home(tree, reference.from, node, Some(pkg));
-                    if mod_outside || external {
+                    if mod_outside || external != Reach::Library {
                         record(
                             mod_usage.entry(node).or_default(),
                             AccessSite {
                                 test: reference.test,
-                                external,
+                                reach: external,
                                 outside_home: mod_outside,
                                 from: reference.from,
                             },
@@ -277,7 +280,7 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
                     &mut thing_usage[target_thing.index()],
                     AccessSite {
                         test: reference.test,
-                        external,
+                        reach: external,
                         outside_home,
                         from: reference.from,
                     },
@@ -293,15 +296,14 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
         // A consumer's is from another crate; text in the workspace is
         // where it is.
         let (external, outside_home, from) = match mention.from {
-            None => (true, true, tree.root()),
+            None => (Reach::OtherPackage, true, tree.root()),
             Some((file, from)) => {
                 let file = &model.files[file.index()];
                 let target = item.file.and_then(|f| model.files[f.index()].target);
                 let same_target = tree.package_of(file.module) == package && file.target == target;
                 let home = declared_home(model, graph, mention.item);
                 (
-                    tree.package_of(file.module) != package
-                        || file.target != Some(TargetKind::Library),
+                    reach(tree.package_of(file.module), package, file.target),
                     !same_target || is_outside_home(tree, from, home, package),
                     from,
                 )
@@ -309,7 +311,7 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
         };
         let site = || AccessSite {
             test: mention.test,
-            external,
+            reach: external,
             outside_home,
             from,
         };
@@ -356,6 +358,7 @@ fn lend_len_to_is_empty(model: &Model, item_usage: &mut [Usage]) {
                 test_used: len.test_used,
                 prod_external_to_lib: len.prod_external_to_lib,
                 test_external_to_lib: len.test_external_to_lib,
+                test_own_target: len.test_own_target,
                 prod_outside_home: len.prod_outside_home,
                 test_outside_home: len.test_outside_home,
                 internal_modules: len.internal_modules.clone(),
@@ -365,6 +368,7 @@ fn lend_len_to_is_empty(model: &Model, item_usage: &mut [Usage]) {
             usage.test_used |= lent.test_used;
             usage.prod_external_to_lib |= lent.prod_external_to_lib;
             usage.test_external_to_lib |= lent.test_external_to_lib;
+            usage.test_own_target |= lent.test_own_target;
             usage.prod_outside_home |= lent.prod_outside_home;
             usage.test_outside_home |= lent.test_outside_home;
             for (module, count) in lent.internal_modules {
@@ -398,8 +402,7 @@ fn record_struct_updates(model: &Model, graph: &Graph, item_usage: &mut [Usage])
                 &mut item_usage[field.index()],
                 AccessSite {
                     test: reference.test,
-                    external: tree.package_of(ref_file.module) != pkg
-                        || ref_file.target != Some(TargetKind::Library),
+                    reach: reach(tree.package_of(ref_file.module), pkg, ref_file.target),
                     outside_home: !same_target || is_outside_home(tree, reference.from, home, pkg),
                     from: reference.from,
                 },
@@ -533,12 +536,12 @@ fn is_over_scoped(model: &Model, id: ItemId, usage: &Usage) -> bool {
         .is_some_and(|package| lists(&policy.crates, &tree.node(package).name));
     // What the crate's settings let tests justify.
     let justified = |by: TestUse, test_used: bool| listed && by == TestUse::Justify && test_used;
+    let external_tests = match policy.external_tests {
+        TestUse::OwnPackage => listed && usage.test_own_target,
+        by => justified(by, usage.test_external_to_lib),
+    };
     match item.visibility {
-        Visibility::Pub => {
-            !usage.prod_used
-                || !(usage.prod_external_to_lib
-                    || justified(policy.external_tests, usage.test_external_to_lib))
-        }
+        Visibility::Pub => !usage.prod_used || !(usage.prod_external_to_lib || external_tests),
         Visibility::Restricted => {
             (!usage.prod_used && usage.test_used)
                 || (usage.prod_used
@@ -599,18 +602,43 @@ fn classify(
     Some(diagnostic)
 }
 
+/// Where a use is, against what it uses: in the library of its package,
+/// in another target of it, or in another package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    Library,
+    OwnTarget,
+    OtherPackage,
+}
+
+/// Where a use in package `from` and target `target` is, against an item
+/// of package `package`'s library.
+fn reach(from: Option<NodeId>, package: Option<NodeId>, target: Option<TargetKind>) -> Reach {
+    if from != package {
+        Reach::OtherPackage
+    } else if target != Some(TargetKind::Library) {
+        Reach::OwnTarget
+    } else {
+        Reach::Library
+    }
+}
+
 fn record(usage: &mut Usage, site: AccessSite) {
+    let external = site.reach != Reach::Library;
     if site.test {
         usage.test_used = true;
-        if site.external {
+        if external {
             usage.test_external_to_lib = true;
+        }
+        if site.reach == Reach::OwnTarget {
+            usage.test_own_target = true;
         }
         if site.outside_home {
             usage.test_outside_home = true;
         }
     } else {
         usage.prod_used = true;
-        if site.external {
+        if external {
             usage.prod_external_to_lib = true;
         } else {
             *usage.internal_modules.entry(site.from).or_default() += 1;

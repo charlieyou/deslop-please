@@ -108,8 +108,9 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
              pub fn tested() -> u32 {{ 2 }}\n\
              pub fn tests_only() -> u32 {{ 3 }}\n\
              pub fn inside_only() -> u32 {{ 4 }}\n\
+             pub fn checked() -> u32 {{ 6 }}\n\
              pub mod a {{\n    pub(crate) fn helper() -> u32 {{ 5 }}\n    \
-                 pub fn run() -> u32 {{ helper() + crate::tested() + crate::inside_only() }}\n}}\n\
+                 pub fn run() -> u32 {{ helper() + crate::tested() + crate::inside_only() + crate::checked() }}\n}}\n\
              pub mod b {{\n    #[cfg(test)]\n    mod tests {{\n        \
                  #[test]\n        fn helper() {{ assert_eq!(crate::a::helper(), 5); }}\n    }}\n}}\n"
         )
@@ -134,9 +135,21 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
             ("core/Cargo.toml", &package("core_t")),
             ("core/src/lib.rs", &lib("core_t")),
             ("core/tests/it.rs", &it("core_t")),
-            ("other/Cargo.toml", &package("other_t")),
+            (
+                "other/Cargo.toml",
+                &format!(
+                    "{}[dev-dependencies]\ncore_t = {{ path = \"../core\" }}\n",
+                    package("other_t")
+                ),
+            ),
             ("other/src/lib.rs", &lib("other_t")),
-            ("other/tests/it.rs", &it("other_t")),
+            (
+                "other/tests/it.rs",
+                &format!(
+                    "{}#[test]\nfn across() {{ assert_eq!(core_t::checked(), 6); }}\n",
+                    it("other_t")
+                ),
+            ),
             (
                 "app/Cargo.toml",
                 &format!(
@@ -164,8 +177,11 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
             format!("test-only-pub {name}::tests_only"),
         ]
     };
+    // Only another package's tests use `core_t::checked` besides its crate.
     let mut everywhere = strict("core_t");
+    everywhere.push("test-only-pub core_t::checked".to_owned());
     everywhere.extend(strict("other_t"));
+    everywhere.push("over-public other_t::checked".to_owned());
     everywhere.sort();
     assert_eq!(surface(keys(&workspace)), everywhere);
 
@@ -181,6 +197,19 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
         "test-only-pub core_t::tests_only".to_owned(),
     ];
     configured.extend(strict("other_t"));
+    configured.push("over-public other_t::checked".to_owned());
+    configured.sort();
+    assert_eq!(surface(keys(&workspace)), configured);
+
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[test-only-pub]\ncrates = [\"core-t\"]\nexternal-tests = \"own-package\"\n",
+    )
+    .unwrap();
+    // Its own `tests/` justify `tested`; another package's do not justify
+    // `checked`, and tests in the crate no `pub(crate)` item.
+    configured.push("test-only-pub core_t::a::helper".to_owned());
+    configured.push("test-only-pub core_t::checked".to_owned());
     configured.sort();
     assert_eq!(surface(keys(&workspace)), configured);
 }
