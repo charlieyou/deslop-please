@@ -6,8 +6,10 @@ use super::{
     item_location, without_generics,
 };
 use crate::graph::Graph;
-use crate::model::{FunctionMetrics, ItemId, ItemKind, Model, NodeId, PositionalTrap};
-use crate::settings::{Kernel, Traps};
+use crate::model::{
+    FunctionMetrics, Item, ItemId, ItemKind, Model, NodeId, PositionalTrap, Visibility,
+};
+use crate::settings::{Kernel, Traps, lists};
 
 /// The most lines of code, from `fn` to its closing brace, that one non-test
 /// function may hold before it wants splitting.
@@ -94,7 +96,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         }
         diagnostics.extend(wide(&found, &metrics));
         diagnostics.extend(trap(&found, &metrics));
-        if metrics.returns_string_error {
+        if metrics.returns_string_error && at_boundary(model, item) {
             diagnostics.push(string_error(&found));
         }
     }
@@ -204,6 +206,20 @@ fn trap(found: &Found, metrics: &FunctionMetrics) -> Option<Diagnostic> {
             most,
         },
     })
+}
+
+/// Whether `function` is where `[string-error]` wants typed errors.
+fn at_boundary(model: &Model, function: &Item) -> bool {
+    let settings = &model.settings.string_error;
+    let application = model
+        .tree
+        .package_of(function.owner)
+        .is_some_and(|package| lists(&settings.application_crates, &model.tree.node(package).name));
+    match function.visibility {
+        Visibility::Pub => true,
+        Visibility::Restricted => !application,
+        Visibility::Private => !application && !settings.boundary_only,
+    }
 }
 
 fn string_error(found: &Found) -> Diagnostic {

@@ -25,6 +25,21 @@ pub struct Settings {
     pub kernel: Kernel,
     /// What tests may widen, in which crates.
     pub test_only_pub: TestOnlyPub,
+    /// Which functions may return `Result<_, String>`.
+    pub string_error: StringError,
+}
+
+/// Where a `String` error is fine: away from a library's boundary. By
+/// default no function may return one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct StringError {
+    /// Only functions visible outside their module are reported: a private
+    /// one's caller in the module still turns the string into an error.
+    pub boundary_only: bool,
+    /// Crates, by package or crate name, that end in a person reading the
+    /// message: only their `pub` functions are reported.
+    pub application_crates: Vec<String>,
 }
 
 /// When a test's use is a reason for an item's visibility. By default it

@@ -81,6 +81,11 @@ positional-trap = "bools" # report bool flags only, not runs of numbers; default
 crates = ["core", "ids"]
 external-tests = "justify" # tests of other packages, of `tests/` and `benches/`, and consumers', for `pub`
 crate-tests = "justify"    # tests elsewhere in the crate, for `pub(crate)`
+
+# Where `Result<_, String>` is fine. By default no function may return it.
+[string-error]
+boundary-only = true                 # report only functions visible outside their module
+application-crates = ["cli", "server"] # here report only `pub` functions
 ```
 
 ### Add to your `AGENTS.md`

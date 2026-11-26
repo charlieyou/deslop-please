@@ -1,7 +1,7 @@
 //! What `deslop-please.toml`'s policies let through, and that without them
 //! every lint keeps its default.
 
-use super::{keys, scratch_workspace};
+use super::{keys, private_pair, scratch_workspace};
 
 #[test]
 fn kernel_paths_are_held_to_finite_limits_of_their_own_and_only_when_configured() {
@@ -183,4 +183,41 @@ fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
     configured.extend(strict("other_t"));
     configured.sort();
     assert_eq!(surface(keys(&workspace)), configured);
+}
+
+#[test]
+fn a_string_error_is_reported_at_a_boundary_when_configured_and_everywhere_by_default() {
+    let lib = "//! Errors.\n\
+               pub fn open(x: u32) -> Result<u32, String> { checked(x).and_then(inner) }\n\
+               pub(crate) fn checked(x: u32) -> Result<u32, String> { inner(x) }\n\
+               fn inner(x: u32) -> Result<u32, String> { if x > 0 { Ok(x) } else { Err(\"zero\".into()) } }\n";
+    let main = "//! An application.\n\
+                pub(crate) fn parse(x: &str) -> Result<u32, String> { x.parse().map_err(|_| read(x).unwrap_err()) }\n\
+                fn read(x: &str) -> Result<u32, String> { Err(format!(\"bad {x}\")) }\n\
+                fn main() { println!(\"{:?}\", parse(\"1\").and_then(core_t::open)); }\n";
+    let workspace = private_pair("string_error_boundary", lib, main, &[]);
+    let errors = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("string-error "))
+            .collect()
+    };
+    assert_eq!(
+        errors(keys(&workspace)),
+        [
+            "string-error app::parse",
+            "string-error app::read",
+            "string-error core_t::checked",
+            "string-error core_t::inner",
+            "string-error core_t::open",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[string-error]\nboundary-only = true\napplication-crates = [\"app\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        errors(keys(&workspace)),
+        ["string-error core_t::checked", "string-error core_t::open"]
+    );
 }
