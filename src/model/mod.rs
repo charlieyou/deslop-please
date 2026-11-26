@@ -6,7 +6,7 @@
 mod from_index;
 mod tree;
 
-pub use from_index::build;
+pub use from_index::{build, outside_uses};
 pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::{HashMap, HashSet};
@@ -24,6 +24,8 @@ pub struct Model {
     pub references: Vec<Reference>,
     /// What each wrapper hands on. No chain of forwarders loops.
     pub wrappers: HashMap<ItemId, Wrapper>,
+    /// The uses of items that no reference shows.
+    pub mentions: Vec<Mention>,
     /// Each item a plain `pub use` names, other than a module, where it does.
     pub reexports: Vec<Reexport>,
     /// `pub use <path>::*;` and `pub(...) use <path>::*;` glob re-exports.
@@ -89,6 +91,16 @@ pub enum Visibility {
     Restricted,
     /// Plain `pub`.
     Pub,
+}
+
+/// A use of an item that no reference shows: by a consumer outside the
+/// workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Mention {
+    pub item: ItemId,
+    pub test: bool,
+    /// Where in the workspace it is, if it is: its file and module.
+    pub from: Option<(FileId, NodeId)>,
 }
 
 /// An item that a plain `pub use` declaration names.

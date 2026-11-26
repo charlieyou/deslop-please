@@ -12,20 +12,39 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{
-    CrateDep, File, FileId, GlobReexport, Item, ItemId, ItemKind, Model, ModuleReexports, NodeId,
-    NodeKind, Reexport, Reference, TraitImpl, Tree, Visibility, Wrapper,
+    CrateDep, File, FileId, GlobReexport, Item, ItemId, ItemKind, Mention, Model, ModuleReexports,
+    NodeId, NodeKind, Reexport, Reference, TraitImpl, Tree, Visibility, Wrapper,
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
 use blocks::Blocks;
 use source::{Access, ImplBlock, Plain, PubUse, Source};
 
-pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
+/// The model of `workspace` from its `index`, with `consumed`, what its
+/// consumers use of it: each symbol, and whether test code uses it.
+pub fn build(
+    index: &Index,
+    workspace: &Workspace,
+    consumed: &[(String, bool)],
+) -> Result<Model, Error> {
     let mut builder = Builder::new(workspace);
     for document in &index.documents {
         builder.add_document(document)?;
     }
-    Ok(builder.finish(index))
+    let mut model = builder.finish(index, consumed);
+    model.mentions.sort();
+    Ok(model)
+}
+
+/// What the code of `workspace`, a consumer, uses of what is outside it,
+/// from its `index`: each symbol, and whether test code uses it.
+pub fn outside_uses(index: &Index, workspace: &Workspace) -> Result<Vec<(String, bool)>, Error> {
+    let mut builder = Builder::new(workspace);
+    for document in &index.documents {
+        builder.add_document(document)?;
+    }
+    builder.mark_test_code();
+    Ok(builder.outside_uses())
 }
 
 fn is_test_module(name: &str) -> bool {
@@ -117,7 +136,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The model, once every document is in.
-    fn finish(mut self, index: &Index) -> Model {
+    fn finish(mut self, index: &Index, consumed: &[(String, bool)]) -> Model {
         let traits = self.read_symbol_information(index);
         self.mark_signatures();
         self.mark_test_code();
@@ -130,11 +149,23 @@ impl<'a> Builder<'a> {
         let wrappers = self.wrappers();
         self.mark_lent_reads(&wrappers);
         let crate_deps = self.collect_crate_deps();
+        let mentions = consumed
+            .iter()
+            .filter_map(|(symbol, test)| match self.symbols.get(symbol.as_str()) {
+                Some(&Named::Item(item)) => Some(Mention {
+                    item,
+                    test: *test,
+                    from: None,
+                }),
+                _ => None,
+            })
+            .collect();
         Model {
             tree: self.tree,
             files: self.files,
             items: self.items,
             references: self.references,
+            mentions,
             reexports: self
                 .units
                 .iter()
@@ -149,6 +180,37 @@ impl<'a> Builder<'a> {
             traits,
             trait_impls,
         }
+    }
+
+    /// What the code uses of what is outside the workspace: each symbol, and
+    /// whether test code uses it. Test code must be marked.
+    fn outside_uses(&self) -> Vec<(String, bool)> {
+        let mut uses = Vec::new();
+        for unit in &self.units {
+            let file = &self.files[unit.file.index()];
+            let imports = unit.source.scan_file().imports;
+            for occurrence in unit.document.occurrences.iter().filter(|o| !o.definition) {
+                let before =
+                    imports.partition_point(|import| import.start <= occurrence.range.start);
+                let imported = before > 0 && imports[before - 1].holds(occurrence.range);
+                let outside =
+                    matches!(self.symbols.get(occurrence.symbol), Some(Named::Outside(_)));
+                if imported || !outside {
+                    continue;
+                }
+                let from = unit
+                    .inline_modules
+                    .innermost(occurrence.range)
+                    .unwrap_or(file.module);
+                uses.push((
+                    occurrence.symbol.to_owned(),
+                    file.test || self.tree.is_test(from),
+                ));
+            }
+        }
+        uses.sort();
+        uses.dedup();
+        uses
     }
 
     fn add_packages(&mut self) {

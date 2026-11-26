@@ -241,10 +241,28 @@ fn run(options: Options) -> Result<bool, Error> {
 }
 
 fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Model, Error> {
+    let consumed = consumed(workspace)?;
     let bytes = indexing::index(workspace, configuration)?;
     let index =
         scip::read(&bytes).map_err(|e| Error::new(format!("rust-analyzer's index: {e}")))?;
-    model::build(&index, workspace)
+    model::build(&index, workspace, &consumed)
+}
+
+/// What the consumers that `deslop-please.toml` names use of anything
+/// outside them, each indexed for the host with default features: each
+/// symbol, and whether test code uses it.
+fn consumed(workspace: &Workspace) -> Result<Vec<(String, bool)>, Error> {
+    let mut uses = Vec::new();
+    for path in &workspace.settings.consumers {
+        let directory = workspace.root.join(path);
+        let consumer = Workspace::discover_in(&directory)
+            .map_err(|e| Error::new(format!("consumer {path}: {e}")))?;
+        let bytes = indexing::index(&consumer, &Configuration::default())?;
+        let index = scip::read(&bytes)
+            .map_err(|e| Error::new(format!("consumer {path}: rust-analyzer's index: {e}")))?;
+        uses.extend(model::outside_uses(&index, &consumer)?);
+    }
+    Ok(uses)
 }
 
 #[cfg(test)]

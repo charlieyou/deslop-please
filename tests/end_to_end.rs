@@ -1356,3 +1356,70 @@ fn main() {
         "{report}"
     );
 }
+
+#[test]
+fn what_a_configured_consumer_outside_the_workspace_uses_is_used_from_another_crate() {
+    let squid = scratch_workspace(
+        "consumers-squid",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"squid\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [workspace]\n[dependencies]\ncore_t = { path = \"../consumers/core\" }\n",
+            ),
+            (
+                "src/lib.rs",
+                "pub fn go() -> u32 { core_t::by_squid() }\n\
+                 #[cfg(test)]\nmod tests {\n    #[test]\n    \
+                 fn checks() { assert_eq!(core_t::by_squid_tests(), 3); }\n}\n",
+            ),
+        ],
+    );
+    assert!(squid.exists());
+    let workspace = scratch_workspace(
+        "consumers",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"core\"]\nexclude = [\"gpu\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core_t\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+            ),
+            (
+                "core/src/lib.rs",
+                "pub fn by_gpu() -> u32 { 1 }\npub fn by_squid() -> u32 { 2 }\n\
+                 pub fn by_squid_tests() -> u32 { 3 }\npub fn by_nobody() -> u32 { 4 }\n",
+            ),
+            (
+                "gpu/Cargo.toml",
+                "[package]\nname = \"gpu\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [workspace]\n[dependencies]\ncore_t = { path = \"../core\" }\n",
+            ),
+            (
+                "gpu/src/lib.rs",
+                "pub fn run() -> u32 { core_t::by_gpu() }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        keys(&workspace),
+        [
+            "unused-pub core_t::by_gpu",
+            "unused-pub core_t::by_nobody",
+            "unused-pub core_t::by_squid",
+            "unused-pub core_t::by_squid_tests",
+        ]
+    );
+    let settings = "consumers = [\"gpu\", \"../consumers-squid\"]\n";
+    std::fs::write(workspace.join("deslop-please.toml"), settings).unwrap();
+    // A consumer's tests are tests.
+    assert_eq!(
+        keys(&workspace),
+        [
+            "test-only-pub core_t::by_squid_tests",
+            "unused-pub core_t::by_nobody",
+        ]
+    );
+}

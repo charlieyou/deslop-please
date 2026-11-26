@@ -54,6 +54,12 @@ layers = [
   ["core"],
   ["cli"],
 ]
+
+# Crates outside the workspace that use it, by their directories relative to
+# the workspace's root: an excluded member, or a crate of another repository.
+# Each is indexed too (for the host, with default features), and what its
+# code uses counts as a use from another crate, its tests' as a test's.
+consumers = ["crates/gpu", "../app/crates/app-solver"]
 ```
 
 ### Add to your `AGENTS.md`

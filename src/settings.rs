@@ -18,6 +18,9 @@ pub struct Settings {
     /// The crates by layer, lowest first: a normal dependency must go to a
     /// lower layer (`layer-violation`).
     pub layers: Vec<Vec<String>>,
+    /// Directories of crates outside the workspace that use it, relative
+    /// to its root: what they use of it is used from another crate.
+    pub consumers: Vec<String>,
 }
 
 impl Settings {

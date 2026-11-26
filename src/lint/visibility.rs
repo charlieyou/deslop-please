@@ -286,6 +286,24 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
     }
 
     record_struct_updates(model, graph, &mut item_usage);
+    for mention in model.mentions.iter().filter(|m| m.from.is_none()) {
+        let site = || AccessSite {
+            test: mention.test,
+            external: true,
+            outside_home: true,
+            from: tree.root(),
+        };
+        record(&mut item_usage[mention.item.index()], site());
+        if let Some(thing) = graph.thing_of[mention.item.index()] {
+            record(&mut thing_usage[thing.index()], site());
+        }
+        let item = &model.items[mention.item.index()];
+        let start = item.module.unwrap_or(home_of(model, graph, mention.item));
+        let package = tree.package_of(start);
+        for module in tree.ancestors(start).take_while(|&m| Some(m) != package) {
+            record(mod_usage.entry(module).or_default(), site());
+        }
+    }
     UsageTables {
         item_usage,
         thing_usage,
