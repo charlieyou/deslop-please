@@ -1476,3 +1476,53 @@ fn a_restricted_method_is_visible_from_where_its_impl_block_is_not_its_types_mod
         "{report}"
     );
 }
+
+#[test]
+fn an_example_is_neither_measured_nor_coupled_but_still_justifies_pub() {
+    let mut lib = String::from(
+        "pub fn for_example() -> u32 { 7 }\n\
+         pub struct Queue { pub items: Vec<u32>, head: usize }\n\
+         impl Queue {\n    pub fn new() -> Self { Queue { items: Vec::new(), head: 0 } }\n    \
+         pub fn len(&self) -> usize { self.items.len() - self.head }\n}\n",
+    );
+    let mut demo = String::from("struct Big {\n");
+    for i in 0..16 {
+        // Fan-out counts no child of the example's root module, the crate's.
+        lib.push_str(&format!(
+            "pub mod g{i} {{ pub mod m {{ pub fn f() -> u32 {{ {i} }} }} }}\n"
+        ));
+        demo.push_str(&format!("    f{i}: u32,\n"));
+    }
+    demo.push_str(
+        "}\nfn wide(a: u8, b: u16, c: u32, d: u64, e: i8, f: i16, g: i32, h: i64) -> i64 {\n    \
+         let mut s = h + g as i64 + f as i64 + e as i64 + d as i64 + c as i64 + b as i64 + a as i64;\n",
+    );
+    demo.push_str(&"    s += 1;\n".repeat(155));
+    demo.push_str(
+        "    s\n}\nfn main() {\n    let mut queue = ex::Queue::new();\n    \
+                   queue.items.push(ex::for_example());\n    let _ = queue.len();\n    let s = 0",
+    );
+    for i in 0..16 {
+        demo.push_str(&format!(" + ex::g{i}::m::f()"));
+    }
+    demo.push_str(";\n    let big = Big {");
+    for i in 0..16 {
+        demo.push_str(&format!(" f{i}: s,"));
+    }
+    demo.push_str(
+        " };\n    let _ = wide(1, 2, 3, 4, 5, 6, 7, big.f0 as i64 + big.f15 as i64);\n}\n",
+    );
+    let workspace = scratch_workspace(
+        "examples",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"ex\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 publish = false\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+            ("examples/demo.rs", &demo),
+        ],
+    );
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+}

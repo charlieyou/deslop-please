@@ -44,6 +44,9 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         else {
             continue;
         };
+        if model.in_example(Some(model.references[usage.reference].file)) {
+            continue;
+        }
         let tangle = graph.tangle_of[owner.index()];
         let insider = usage.user.is_some_and(|user| {
             user == owner || (tangle.is_some() && graph.tangle_of[user.index()] == tangle)

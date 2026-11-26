@@ -35,6 +35,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             && !item.holds_nothing
             && !tree.is_test(item.owner)
             && item.file.is_none_or(|file| !model.files[file.index()].test)
+            && !model.in_example(item.file)
             && let Some(thing) = graph.thing_of[index]
         {
             fields.entry(thing).or_default().push(ItemId::new(index));

@@ -263,6 +263,14 @@ pub enum Wrapper {
     },
 }
 
+impl Model {
+    /// Whether `file` is in an example target. An example's root module is
+    /// its package's, so its code would count as the crate's own.
+    pub fn in_example(&self, file: Option<FileId>) -> bool {
+        file.is_some_and(|file| self.files[file.index()].target == Some(TargetKind::Example))
+    }
+}
+
 impl FileId {
     pub fn new(index: usize) -> FileId {
         FileId(u32::try_from(index).expect("fewer than 2^32 files"))

@@ -44,6 +44,8 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         if item.kind == ItemKind::Module
             || tree.is_test(item.owner)
             || item.file.is_some_and(|file| model.files[file.index()].test)
+            || model.in_example(Some(reference.file))
+            || model.in_example(item.file)
         {
             continue;
         }
@@ -136,6 +138,7 @@ fn check_feature_envy(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Ve
         };
         let fn_item = &model.items[holder.index()];
         if fn_item.kind != ItemKind::Function
+            || model.in_example(fn_item.file)
             || fn_item.trait_impl
             || fn_item.parent.is_none()
             || model.wrappers.contains_key(&holder)
