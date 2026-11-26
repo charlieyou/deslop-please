@@ -1423,3 +1423,56 @@ fn what_a_configured_consumer_outside_the_workspace_uses_is_used_from_another_cr
         ]
     );
 }
+
+#[test]
+fn a_restricted_method_is_visible_from_where_its_impl_block_is_not_its_types_module() {
+    let workspace = scratch_workspace(
+        "declared_home",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"homes\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 publish = false\n[workspace]\n",
+            ),
+            (
+                "src/lib.rs",
+                "mod home;\nmod ops;\n\
+                 pub fn run() -> u32 { let store = home::Store::new(); ops::go(&store) + store.total() }\n",
+            ),
+            (
+                "src/home.rs",
+                "mod detail;\npub(crate) struct Store { pub(crate) n: u32 }\n\
+                 impl Store {\n    pub(crate) fn new() -> Self { Store { n: 1 } }\n    \
+                 pub(crate) fn total(&self) -> u32 { self.shared() + 1 }\n}\n",
+            ),
+            (
+                "src/home/detail.rs",
+                "use super::Store;\n\
+                 impl Store { pub(crate) fn shared(&self) -> u32 { self.n + 1 } }\n",
+            ),
+            (
+                "src/ops.rs",
+                "use crate::home::Store;\n\
+                 impl Store { pub(crate) fn helper(&self) -> u32 { self.n * 2 } }\n\
+                 pub(crate) fn go(store: &Store) -> u32 { store.helper() + 1 }\n",
+            ),
+            ("src/main.rs", "fn main() { let _ = homes::run(); }\n"),
+        ],
+    );
+    // Private, `helper` is still visible in `ops`, where all its callers
+    // are, and `shared` would no longer be visible in `home`, its caller.
+    assert_eq!(
+        keys(&workspace),
+        [
+            "over-public homes::home::Store::helper",
+            "scattered-impl homes::home::Store",
+        ]
+    );
+    let report = run(&workspace, &[]).stdout;
+    assert!(
+        report.contains(
+            "error[over-public]: `Store::helper` is `pub(crate)`/`pub(super)` but only used inside `homes::ops`"
+        ),
+        "{report}"
+    );
+}

@@ -225,8 +225,9 @@ fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
         // Item-level usage (ignore direct self-recursion).
         if reference.holder != Some(target) {
             let item_home = home_of(model, graph, target);
+            let declared = declared_home(model, graph, target);
             let outside_home =
-                !same_target || is_outside_home(tree, reference.from, item_home, target_pkg);
+                !same_target || is_outside_home(tree, reference.from, declared, target_pkg);
             record(
                 &mut item_usage[target.index()],
                 AccessSite {
@@ -331,7 +332,7 @@ fn record_struct_updates(model: &Model, graph: &Graph, item_usage: &mut [Usage])
         let same_target = tree.package_of(ref_file.module) == pkg
             && ref_file.target == ty.file.and_then(|f| model.files[f.index()].target);
         for &field in fields.get(&reference.item).into_iter().flatten() {
-            let home = home_of(model, graph, field);
+            let home = declared_home(model, graph, field);
             record(
                 &mut item_usage[field.index()],
                 AccessSite {
@@ -633,6 +634,18 @@ fn home_of(model: &Model, graph: &Graph, id: ItemId) -> NodeId {
     })
 }
 
+/// Where rustc checks a restricted item's visibility from: where it is
+/// declared, which for a method is its `impl` block's module, not its
+/// type's. Private, it is visible there and below.
+fn declared_home(model: &Model, graph: &Graph, id: ItemId) -> NodeId {
+    let item = &model.items[id.index()];
+    if item.visibility == Visibility::Restricted {
+        item.owner
+    } else {
+        home_of(model, graph, id)
+    }
+}
+
 fn build_module_diagnostic(
     model: &Model,
     module: NodeId,
@@ -718,7 +731,7 @@ fn build_diagnostic(
     let location = item_location(model, id);
 
     if item.visibility == Visibility::Restricted {
-        let home_name = tree.display(home);
+        let home_name = tree.display(declared_home(model, graph, id));
         if !usage.prod_used && usage.test_used {
             Diagnostic {
                 lint: Lint::Surface(SurfaceLint::TestOnlyPub),
