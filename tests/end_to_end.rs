@@ -1234,3 +1234,45 @@ fn the_settings_file_is_toml_and_a_key_it_does_not_know_is_an_error() {
         misspelt.stderr
     );
 }
+
+/// A private library crate, `core_t`, with `lib`, and a binary, `app`, that
+/// depends on it with `main`.
+fn private_pair(test: &str, lib: &str, main: &str, extra: &[(&str, &str)]) -> PathBuf {
+    let mut files = vec![
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"app\", \"core\"]\nresolver = \"3\"\n",
+        ),
+        (
+            "core/Cargo.toml",
+            "[package]\nname = \"core_t\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+        ),
+        ("core/src/lib.rs", lib),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+             [dependencies]\ncore_t = { path = \"../core\" }\n",
+        ),
+        ("app/src/main.rs", main),
+    ];
+    files.extend_from_slice(extra);
+    scratch_workspace(test, &files)
+}
+
+#[test]
+fn a_traits_items_take_its_visibility_and_are_not_narrowed_on_their_own() {
+    let lib = "pub trait Shape {\n    fn area(&self) -> u32;\n    \
+               fn name(&self) -> &'static str { \"shape\" }\n}\n\
+               pub struct Square { side: u32 }\n\
+               impl Shape for Square { fn area(&self) -> u32 { self.side() * self.side } }\n\
+               pub struct Dot;\nimpl Shape for Dot { fn area(&self) -> u32 { 0 } }\n\
+               impl Square {\n    pub fn new(side: u32) -> Self { Self { side } }\n    \
+               pub fn side(&self) -> u32 { self.side }\n}\n\
+               pub fn total(shape: &dyn Shape) -> u32 { shape.area() + shape.name().len() as u32 }\n";
+    let main = "fn show(shape: &dyn core_t::Shape) -> u32 { core_t::total(shape) }\n\
+                fn main() { let _ = show(&core_t::Square::new(2)) + show(&core_t::Dot); }\n";
+    let workspace = private_pair("trait_items", lib, main, &[]);
+    // `area` and `name` are used only inside `core_t`, as `side` is, but
+    // only `side` can be narrowed.
+    assert_eq!(keys(&workspace), ["over-public core_t::Square::side"]);
+}

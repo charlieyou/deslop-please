@@ -379,7 +379,12 @@ fn qualifying_package(model: &Model, id: ItemId) -> Option<NodeId> {
     }
     if let Some(parent) = item.parent {
         let parent_item = &model.items[parent.index()];
-        if parent_item.kind != ItemKind::Type || parent_item.visibility < item.visibility {
+        // rust-analyzer writes a trait's items as `pub fn`, but they take
+        // the trait's visibility and cannot have one of their own (E0449).
+        if parent_item.kind != ItemKind::Type
+            || parent_item.visibility < item.visibility
+            || model.traits.contains(&parent)
+        {
             return None;
         }
     }
