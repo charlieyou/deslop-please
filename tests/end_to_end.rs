@@ -1912,3 +1912,89 @@ fn kernel_paths_are_held_to_finite_limits_of_their_own_and_only_when_configured(
     relaxed.sort();
     assert_eq!(sized(keys(&workspace)), relaxed);
 }
+
+#[test]
+fn tests_justify_what_production_uses_too_and_only_in_the_crates_configured() {
+    let lib = |name: &str| -> String {
+        format!(
+            "//! The {name} crate.\n\
+             pub fn shared() -> u32 {{ 1 }}\n\
+             pub fn tested() -> u32 {{ 2 }}\n\
+             pub fn tests_only() -> u32 {{ 3 }}\n\
+             pub fn inside_only() -> u32 {{ 4 }}\n\
+             pub mod a {{\n    pub(crate) fn helper() -> u32 {{ 5 }}\n    \
+                 pub fn run() -> u32 {{ helper() + crate::tested() + crate::inside_only() }}\n}}\n\
+             pub mod b {{\n    #[cfg(test)]\n    mod tests {{\n        \
+                 #[test]\n        fn helper() {{ assert_eq!(crate::a::helper(), 5); }}\n    }}\n}}\n"
+        )
+    };
+    let it = |name: &str| -> String {
+        format!(
+            "#[test]\nfn uses() {{ assert_eq!({name}::tested() + {name}::tests_only(), 5); }}\n"
+        )
+    };
+    let package = |name: &str| -> String {
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n"
+        )
+    };
+    let workspace = scratch_workspace(
+        "test_policy",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"app\", \"core\", \"other\"]\nresolver = \"3\"\n",
+            ),
+            ("core/Cargo.toml", &package("core_t")),
+            ("core/src/lib.rs", &lib("core_t")),
+            ("core/tests/it.rs", &it("core_t")),
+            ("other/Cargo.toml", &package("other_t")),
+            ("other/src/lib.rs", &lib("other_t")),
+            ("other/tests/it.rs", &it("other_t")),
+            (
+                "app/Cargo.toml",
+                &format!(
+                    "{}[dependencies]\ncore_t = {{ path = \"../core\" }}\nother_t = {{ path = \"../other\" }}\n",
+                    package("app")
+                ),
+            ),
+            (
+                "app/src/main.rs",
+                "fn main() {\n    println!(\"{}\", core_t::shared() + core_t::a::run() + \
+                 other_t::shared() + other_t::a::run());\n}\n",
+            ),
+        ],
+    );
+    let surface = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("test-only-pub ") || key.starts_with("over-public "))
+            .collect()
+    };
+    let strict = |name: &str| -> Vec<String> {
+        vec![
+            format!("over-public {name}::inside_only"),
+            format!("test-only-pub {name}::a::helper"),
+            format!("test-only-pub {name}::tested"),
+            format!("test-only-pub {name}::tests_only"),
+        ]
+    };
+    let mut everywhere = strict("core_t");
+    everywhere.extend(strict("other_t"));
+    everywhere.sort();
+    assert_eq!(surface(keys(&workspace)), everywhere);
+
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[test-only-pub]\ncrates = [\"core-t\"]\nexternal-tests = \"justify\"\n\
+         crate-tests = \"justify\"\n",
+    )
+    .unwrap();
+    // A test justifies what production uses too, not what only tests use.
+    let mut configured = vec![
+        "over-public core_t::inside_only".to_owned(),
+        "test-only-pub core_t::tests_only".to_owned(),
+    ];
+    configured.extend(strict("other_t"));
+    configured.sort();
+    assert_eq!(surface(keys(&workspace)), configured);
+}

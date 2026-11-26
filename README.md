@@ -72,6 +72,15 @@ most-params = 14       # wide-signature; default 7
 most-lines = 300       # long-function, in code lines; default 150
 most-file-lines = 6000 # long-file; default 2000
 positional-trap = "bools" # report bool flags only, not runs of numbers; default "all"
+
+# What tests may widen. By default a test's use never justifies visibility.
+# With "justify", a test's use does, but only for an item that production
+# code uses too, and only in the crates listed. Test fixtures belong in a
+# module named `tests`, `test`, `test_*` or `*_tests`, which is test code.
+[test-only-pub]
+crates = ["core", "ids"]
+external-tests = "justify" # tests of other packages, of `tests/` and `benches/`, and consumers', for `pub`
+crate-tests = "justify"    # tests elsewhere in the crate, for `pub(crate)`
 ```
 
 ### Add to your `AGENTS.md`

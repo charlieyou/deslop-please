@@ -14,6 +14,7 @@ use super::{
 };
 use crate::graph::{Graph, ThingId};
 use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility};
+use crate::settings::{TestUse, lists};
 use crate::workspace::TargetKind;
 
 #[derive(Default)]
@@ -524,10 +525,26 @@ fn is_outside_home(
 }
 
 fn is_over_scoped(model: &Model, id: ItemId, usage: &Usage) -> bool {
-    match model.items[id.index()].visibility {
-        Visibility::Pub => !usage.prod_used || !usage.prod_external_to_lib,
+    let item = &model.items[id.index()];
+    let tree = &model.tree;
+    let policy = &model.settings.test_only_pub;
+    let module = item.module.unwrap_or(item.owner);
+    let listed = tree
+        .package_of(module)
+        .is_some_and(|package| lists(&policy.crates, &tree.node(package).name));
+    // What the crate's settings let tests justify.
+    let justified = |by: TestUse, test_used: bool| listed && by == TestUse::Justify && test_used;
+    match item.visibility {
+        Visibility::Pub => {
+            !usage.prod_used
+                || !(usage.prod_external_to_lib
+                    || justified(policy.external_tests, usage.test_external_to_lib))
+        }
         Visibility::Restricted => {
-            (!usage.prod_used && usage.test_used) || (usage.prod_used && !usage.prod_outside_home)
+            (!usage.prod_used && usage.test_used)
+                || (usage.prod_used
+                    && !(usage.prod_outside_home
+                        || justified(policy.crate_tests, usage.test_outside_home)))
         }
         Visibility::Private => false,
     }

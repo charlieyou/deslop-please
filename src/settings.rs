@@ -23,6 +23,40 @@ pub struct Settings {
     pub consumers: Vec<String>,
     /// Hot code held to limits of its own.
     pub kernel: Kernel,
+    /// What tests may widen, in which crates.
+    pub test_only_pub: TestOnlyPub,
+}
+
+/// When a test's use is a reason for an item's visibility. By default it
+/// never is: an item `pub` for tests elsewhere is `test-only-pub`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct TestOnlyPub {
+    /// The crates, by package or crate name, that the policy is for; in
+    /// others every test use is reported as today.
+    pub crates: Vec<String>,
+    /// Tests in other packages, in the crate's own `tests/` and `benches/`,
+    /// and a consumer's tests, for a `pub` item.
+    pub external_tests: TestUse,
+    /// Tests elsewhere in the crate, for a `pub(crate)` item.
+    pub crate_tests: TestUse,
+}
+
+/// What a test's use of an item says about its visibility.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TestUse {
+    /// Nothing: the item is wider than its production use needs.
+    #[default]
+    Report,
+    /// It justifies the visibility, when the item has a production use too.
+    Justify,
+}
+
+/// Whether `names`, package names such as `solver-core` or crate names such
+/// as `solver_core`, holds the crate named `name`.
+pub fn lists(names: &[String], name: &str) -> bool {
+    names.iter().any(|listed| listed.replace('-', "_") == name)
 }
 
 /// Paths of hot code that numeric work makes wide and long: kernels,
