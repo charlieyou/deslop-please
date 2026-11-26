@@ -38,6 +38,9 @@ pub struct Model {
     pub settings: Settings,
     /// Structs/enums deriving `Serialize` or `Deserialize`.
     pub serde_types: HashSet<ItemId>,
+    /// Each field's declared type, as its tokens without paths or
+    /// lifetimes: `[ Card ; 4 ]`.
+    pub field_types: HashMap<ItemId, String>,
     /// Workspace `trait` items.
     pub traits: HashSet<ItemId>,
     /// Observed `impl Trait for Type` blocks keyed by the trait's [`ItemId`].

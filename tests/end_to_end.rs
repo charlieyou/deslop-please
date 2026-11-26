@@ -1701,3 +1701,31 @@ fn main() { let _ = base::all(&Engine) + base::Thing(2).twice(); }
         ]
     );
 }
+
+#[test]
+fn structs_duplicate_each_other_only_when_their_fields_have_the_same_types_too() {
+    let lib = "\
+pub mod ids { pub struct PlayerId(pub u8); }
+use ids::PlayerId;
+pub struct Hand4 { pub cards: [u8; 4], pub seat: PlayerId, pub stack: u32, pub pot: u32 }
+pub struct Hand3 { pub cards: [u8; 3], pub seat: PlayerId, pub stack: u32, pub pot: u32 }
+pub struct SeatA { pub cards: [u8; 2], pub seat: PlayerId, pub stack: u32, pub pot: u32 }
+pub struct SeatB { pub cards: [u8; 2], pub seat: crate::ids::PlayerId, pub stack: u32, pub pot: u32 }
+pub struct SeatC { pub cards: [u8; 2], pub seat: usize, pub stack: u32, pub pot: u32 }
+";
+    let workspace = scratch_workspace(
+        "duplicate_struct_types",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"dups\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+        ],
+    );
+    // A path to the same type is the same type.
+    assert_eq!(
+        keys(&workspace),
+        ["duplicate-struct dups::SeatA,dups::SeatB"]
+    );
+}

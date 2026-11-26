@@ -11,8 +11,11 @@ use crate::graph::{Graph, ThingId};
 use crate::model::{BodyFingerprint, ItemId, ItemKind, Model, NodeId};
 
 /// Minimum non-marker fields required before two structs with identical field
-/// names are flagged as `duplicate-struct`.
+/// names and types are flagged as `duplicate-struct`.
 const MIN_STRUCT_FIELDS: usize = 4;
+
+/// A struct's fields, each by its name and declared type.
+type Fields = Vec<(String, String)>;
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let mut diagnostics = check_functions(model, graph, scope);
@@ -100,7 +103,7 @@ fn check_functions(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<D
 
 fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
-    let mut by_thing: BTreeMap<ThingId, Vec<String>> = BTreeMap::new();
+    let mut by_thing: BTreeMap<ThingId, Fields> = BTreeMap::new();
     for (index, item) in model.items.iter().enumerate() {
         let of_struct = item
             .parent
@@ -113,18 +116,23 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             && let Some(thing) = graph.thing_of[index]
         {
             let leaf = item.name.rsplit("::").next().unwrap_or(&item.name);
-            by_thing.entry(thing).or_default().push(leaf.to_owned());
+            let written = model.field_types.get(&ItemId::new(index)).cloned();
+            by_thing
+                .entry(thing)
+                .or_default()
+                .push((leaf.to_owned(), written.unwrap_or_default()));
         }
     }
 
-    // Group structs with identical `(is_serde, sorted_field_names)` so intentional
-    // wire-DTO vs domain pairs stay separate while shadow clones in the same layer match.
+    // Group structs with identical `(is_serde, sorted (field name, type))` so
+    // intentional wire-DTO vs domain pairs, and `[Card; 4]` vs `[Card; 3]`,
+    // stay apart while shadow clones in the same layer match.
     struct StructCopy {
         key: String,
         home: NodeId,
         location: Option<Location>,
     }
-    let mut groups: BTreeMap<(bool, Vec<String>), Vec<StructCopy>> = BTreeMap::new();
+    let mut groups: BTreeMap<(bool, Fields), Vec<StructCopy>> = BTreeMap::new();
     for (thing, mut fields) in by_thing {
         if fields.len() < MIN_STRUCT_FIELDS {
             continue;
@@ -169,7 +177,8 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
                 None => format!("`{}`", e.key),
             })
             .collect();
-        notes.push(format!("shared fields: {}", listed(&fields)));
+        let names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
+        notes.push(format!("shared fields: {}", listed(&names)));
         diagnostics.push(Diagnostic {
             lint: Lint::Hygiene(HygieneLint::DuplicateStruct),
             key,

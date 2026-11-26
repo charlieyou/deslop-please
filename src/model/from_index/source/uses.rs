@@ -20,6 +20,13 @@ pub enum Access {
     Reach,
 }
 
+/// A field's declared type.
+pub struct FieldType {
+    pub holds: Plain,
+    /// Its tokens, without paths or lifetimes: `[ Card ; 4 ]`.
+    pub written: String,
+}
+
 /// What a field's declared type holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plain {
@@ -323,17 +330,25 @@ impl Source {
         None
     }
 
-    /// What the field written at `field` holds, by its declared type.
-    pub fn plain(&self, field: Range) -> Plain {
+    /// The type declared by the field written at `field`, and what it holds.
+    pub fn field(&self, field: Range) -> FieldType {
+        let written = self.written_type(field);
+        FieldType {
+            holds: plain(&written),
+            written: written.join(" "),
+        }
+    }
+
+    /// The type that the field written at `field` declares, as
+    /// [`normalized`](Source::normalized) tokens.
+    fn written_type(&self, field: Range) -> Vec<&str> {
         let Some(tokens) = self.tokens_in(field) else {
-            return Plain::No;
+            return Vec::new();
         };
-        let written: Vec<&str> = self
-            .normalized(self.declared_type(tokens))
+        self.normalized(self.declared_type(tokens))
             .into_iter()
             .map(|(_, text)| text)
-            .collect();
-        plain(&written)
+            .collect()
     }
 
     /// What a method with this signature and body, which computes nothing,
@@ -570,7 +585,7 @@ mod tests {
                 column: written.len() as u32,
             };
             let start = Position { line: 0, column: 0 };
-            source.plain(Range { start, end })
+            source.field(Range { start, end }).holds
         };
         assert_eq!(of("pub(crate) head: usize"), Plain::Scalar);
         assert_eq!(of("_config: PhantomData<fn() -> C>"), Plain::Nothing);

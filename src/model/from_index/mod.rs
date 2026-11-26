@@ -148,7 +148,7 @@ impl<'a> Builder<'a> {
         let serde_types = self.collect_serde_types();
         let trait_impls = self.collect_trait_impls(&traits);
         self.mark_copies();
-        self.mark_markers();
+        let field_types = self.mark_markers();
         let wrappers = self.wrappers();
         self.mark_lent_reads(&wrappers);
         let crate_deps = self.collect_crate_deps();
@@ -180,6 +180,7 @@ impl<'a> Builder<'a> {
             crate_deps,
             settings: self.workspace.settings.clone(),
             serde_types,
+            field_types,
             traits,
             trait_impls,
         }
@@ -679,15 +680,19 @@ impl<'a> Builder<'a> {
     }
 
     /// Marks the fields of marker types, which hold nothing.
-    fn mark_markers(&mut self) {
+    /// And returns each field's declared type.
+    fn mark_markers(&mut self) -> HashMap<ItemId, String> {
+        let mut types = HashMap::new();
         for (&item, &definition) in &self.definitions {
             if self.items[item.index()].kind == ItemKind::Field
                 && let Some((unit, range)) = definition
-                && self.units[unit].source.plain(range) == Plain::Nothing
             {
-                self.items[item.index()].holds_nothing = true;
+                let field = self.units[unit].source.field(range);
+                self.items[item.index()].holds_nothing |= field.holds == Plain::Nothing;
+                types.insert(item, field.written);
             }
         }
+        types
     }
 
     /// Marks the calls of accessors that lend to read, directly or through
@@ -731,7 +736,7 @@ impl<'a> Builder<'a> {
         let mut holds = fields.iter().map(|&field| {
             *plain.entry(field).or_insert_with(|| {
                 match self.definitions.get(&field).copied().flatten() {
-                    Some((unit, range)) => self.units[unit].source.plain(range),
+                    Some((unit, range)) => self.units[unit].source.field(range).holds,
                     None => Plain::No,
                 }
             })
