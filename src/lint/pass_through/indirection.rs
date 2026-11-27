@@ -1,8 +1,13 @@
 //! Indirections that add nothing, each reported only when `opt-in` names
 //! it, so that a codebase can judge its signal first:
 //! - `rename-getter`: a method whose body only hands out one field of
-//!   `self`, by reference or by copy, under its name or another. Such a
-//!   getter keeps `field-leak` quiet without hiding anything.
+//!   `self`, by reference or by copy, under its name or another, when it
+//!   adds nothing to reading the field: only tests call it, or none; every
+//!   caller sees the field, `pub` or in reach of its module; or its type is
+//!   a record, with no method but getters and other fields as visible as
+//!   it. Such a getter keeps `field-leak` quiet without hiding anything.
+//!   `[rename-getter] all-private-fields` reports every one, also a
+//!   read-only accessor of a field its type maintains.
 //! - `one-use-args`: a struct built at one place, in the one function that
 //!   passes it to another, which alone reads it: a parameter list moved
 //!   into a type.
@@ -21,7 +26,8 @@ use crate::lint::{
     Diagnostic, EncapsulationLint, Lint, Location, Picture, clickable, in_scope, item_location,
     without_generics,
 };
-use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility, Wrapper};
+use crate::model::{FileId, ItemId, ItemKind, Model, NodeId, Visibility, Wrapper};
+use crate::workspace::TargetKind;
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let settings = &model.settings;
@@ -80,6 +86,31 @@ fn rename_getters(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Di
         })
         .collect();
     getters.sort();
+    // By getter, where the code that calls it is, and whether it is a
+    // test's; a consumer's is nowhere in the workspace.
+    let mut callers: HashMap<ItemId, Vec<Caller>> = getters
+        .iter()
+        .map(|&(getter, _, _)| (getter, Vec::new()))
+        .collect();
+    for reference in &model.references {
+        if reference.holder != Some(reference.item)
+            && let Some(found) = callers.get_mut(&reference.item)
+        {
+            found.push(Caller {
+                at: Some((reference.file, reference.from)),
+                test: reference.test,
+            });
+        }
+    }
+    for mention in &model.mentions {
+        if let Some(found) = callers.get_mut(&mention.item) {
+            found.push(Caller {
+                at: mention.from,
+                test: mention.test,
+            });
+        }
+    }
+    let every = model.settings.rename_getter.all_private_fields;
     let mut diagnostics = Vec::new();
     for (getter, field, copies) in getters {
         let (key, home) = key(model, graph, getter);
@@ -88,18 +119,25 @@ fn rename_getters(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Di
         }
         let name = without_generics(&model.items[getter.index()].name);
         let field_name = last_name(model, field);
+        let Some(why) = needless(model, getter, field, &callers[&getter]).or_else(|| {
+            every.then(|| {
+                "what do its callers do with the field? that is the method to write".to_owned()
+            })
+        }) else {
+            continue;
+        };
         let renamed = last_name(model, getter) != field_name;
         let how = if copies { "a copy of" } else { "a borrow of" };
+        let mut notes = vec![why];
+        if renamed {
+            notes.push(format!("it names `{field_name}` another way"));
+        }
         diagnostics.push(Diagnostic {
             lint: Lint::Encapsulation(EncapsulationLint::RenameGetter),
             key: key.clone(),
             message: format!("`{name}` only hands out {how} `{field_name}`"),
             location: item_location(model, getter),
-            notes: vec![if renamed {
-                format!("it names `{field_name}` another way; what do its callers do with it?")
-            } else {
-                "what do its callers do with the field? that is the method to write".to_owned()
-            }],
+            notes,
             picture: Picture::Arrow {
                 from: key,
                 to: field_name,
@@ -112,6 +150,100 @@ fn rename_getters(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Di
         });
     }
     diagnostics
+}
+
+/// Where code that calls a getter is: its file and module, or `None` for a
+/// consumer's.
+struct Caller {
+    at: Option<(FileId, NodeId)>,
+    test: bool,
+}
+
+/// Why `getter`, which hands out `field`, adds nothing to reading the field,
+/// given its `callers`, if it does not: no code but tests calls it, every
+/// caller could read the field itself, or its type is a record whose other
+/// fields are as visible as the getter. A getter that keeps a field its own
+/// type maintains read-only to others is none of these.
+fn needless(model: &Model, getter: ItemId, field: ItemId, callers: &[Caller]) -> Option<String> {
+    let tree = &model.tree;
+    // A published library's `pub` getter has callers no index shows.
+    let getter_item = &model.items[getter.index()];
+    let published = getter_item.visibility == Visibility::Pub
+        && getter_item
+            .file
+            .is_some_and(|file| model.files[file.index()].target == Some(TargetKind::Library))
+        && tree
+            .package_of(getter_item.owner)
+            .is_some_and(|package| tree.node(package).publish);
+    if !published && callers.iter().all(|caller| caller.test) {
+        return Some(if callers.is_empty() {
+            "nothing calls it: remove it".to_owned()
+        } else {
+            "only tests call it: what do they need from the type?".to_owned()
+        });
+    }
+    let item = &model.items[field.index()];
+    let name = last_name(model, field);
+    let ty = item.parent?;
+    let ty_item = &model.items[ty.index()];
+    let home = ty_item.owner;
+    let package = tree.package_of(home);
+    let target = ty_item
+        .file
+        .and_then(|file| model.files[file.index()].target);
+    if item.visibility == Visibility::Pub {
+        return Some(format!("`{name}` is `pub`: its callers can read it"));
+    }
+    // Where the field is surely visible: below its type's module, private;
+    // below its parent, restricted, as `pub(super)` and all wider are.
+    let seen_below = match item.visibility {
+        Visibility::Restricted if Some(home) != package => tree.parent(home)?,
+        _ => home,
+    };
+    let sees = |caller: &Caller| {
+        caller.at.is_some_and(|(file, from)| {
+            let file = &model.files[file.index()];
+            tree.package_of(from) == package
+                && file.target == target
+                && tree.is_within(from, seen_below)
+        })
+    };
+    if !published && callers.iter().all(sees) {
+        return Some(format!(
+            "every caller is in `{}`, which sees `{name}`: let them read it",
+            tree.display(seen_below)
+        ));
+    }
+    // A record: its other fields are as visible as the getter, and its
+    // functions only hand out fields; no trait's function, constructor or
+    // method keeps `field`.
+    let mut others = model
+        .items
+        .iter()
+        .enumerate()
+        .filter(|&(at, other)| {
+            other.kind == ItemKind::Field
+                && other.parent == Some(ty)
+                && !other.holds_nothing
+                && at != field.index()
+        })
+        .peekable();
+    let visibility = getter_item.visibility;
+    let plain = others.peek().is_some() && others.all(|(_, other)| other.visibility >= visibility);
+    let only_getters = model.items.iter().enumerate().all(|(at, method)| {
+        method.kind != ItemKind::Function
+            || method.parent != Some(ty)
+            || matches!(
+                model.wrappers.get(&ItemId::new(at)),
+                Some(Wrapper::Accessor { .. })
+            )
+    });
+    (plain && only_getters).then(|| {
+        format!(
+            "`{}`'s other fields are as visible and it has no method but getters: a record",
+            last_name(model, ty)
+        )
+    })
 }
 
 /// The items whose definitions hold each reference to `items`, by item.

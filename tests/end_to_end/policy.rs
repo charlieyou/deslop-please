@@ -1235,7 +1235,7 @@ pub mod gpu { pub use dep::Remote; }
             (
                 "Cargo.toml",
                 "[package]\nname = \"shims\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
-                 [dependencies]\ndep = { path = \"dep\" }\n[workspace]\n",
+                 publish = false\n[dependencies]\ndep = { path = \"dep\" }\n[workspace]\n",
             ),
             ("src/lib.rs", lib),
             (
@@ -1287,6 +1287,144 @@ pub mod gpu { pub use dep::Remote; }
             "redundant-reexport shims::gpu::Remote",
             "rename-getter shims::queue::Queue::entries",
             "rename-getter shims::queue::Queue::head",
+        ]
+    );
+}
+
+#[test]
+fn a_getter_is_reported_by_default_only_when_reading_its_field_would_do() {
+    let lib = "//! Getters.\n\
+pub mod table {
+    pub struct Table { rows: Vec<u32>, width: usize, pub label: String, pub(crate) depth: u32, seed: u64 }
+    impl Table {
+        pub fn new(width: usize) -> Table {
+            Table { rows: vec![0; width], width, label: String::new(), depth: 0, seed: 7 }
+        }
+        pub fn grow(&mut self) { self.rows.push(0); self.width += 1; }
+        pub fn width(&self) -> usize { self.width }
+        pub fn label(&self) -> &String { &self.label }
+        fn rows(&self) -> &Vec<u32> { &self.rows }
+        pub fn total(&self) -> u32 { self.rows().iter().sum() }
+        pub fn depth(&self) -> u32 { self.depth }
+        pub fn seed(&self) -> u64 { self.seed }
+    }
+    pub struct Span { start: u32, pub end: u32 }
+    impl Span { pub fn start(&self) -> u32 { self.start } }
+    pub struct Lock { entries: Vec<u32>, pub count: u8 }
+    impl Lock {
+        pub fn new(mut entries: Vec<u32>) -> Lock { entries.sort(); Lock { entries, count: 0 } }
+        pub fn entries(&self) -> &Vec<u32> { &self.entries }
+    }
+    pub struct Sorted { items: Vec<u32>, pub label: String }
+    impl From<Vec<u32>> for Sorted {
+        fn from(mut items: Vec<u32>) -> Sorted { items.sort(); Sorted { items, label: String::new() } }
+    }
+    impl Sorted { pub fn items(&self) -> &Vec<u32> { &self.items } }
+    pub struct Cursor { pos: usize, pub data: Vec<u8> }
+    impl Iterator for Cursor {
+        type Item = u8;
+        fn next(&mut self) -> Option<u8> { self.pos += 1; self.data.get(self.pos - 1).copied() }
+    }
+    impl Cursor { pub fn pos(&self) -> usize { self.pos } }
+}
+pub mod report {
+    use crate::table::{Cursor, Lock, Sorted, Span, Table};
+    pub fn show(t: &Table, s: &Span, l: &Lock, o: &Sorted, c: &Cursor) -> usize {
+        t.width() + t.label().len() + t.depth() as usize + s.start() as usize + l.entries().len()
+            + o.items().len() + c.pos()
+    }
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn seeded() { assert_eq!(crate::table::Table::new(1).seed(), 7); }
+    }
+}
+";
+    let manifest = "[package]\nname = \"getters\"\nversion = \"0.1.0\"\nedition = \"2024\"\n";
+    let workspace = scratch_workspace(
+        "rename_getters",
+        &[
+            (
+                "Cargo.toml",
+                &format!("{manifest}publish = false\n[workspace]\n"),
+            ),
+            ("src/lib.rs", lib),
+            (
+                "src/main.rs",
+                "mod tool {\n    pub struct Tool { w: usize }\n    impl Tool {\n        \
+                 pub fn new() -> Tool { Tool { w: 0 } }\n        \
+                 pub fn grow(&mut self) { self.w += 1; }\n        \
+                 pub fn w(&self) -> usize { self.w }\n    }\n}\n\
+                 fn main() { tool::Tool::new().grow(); }\n",
+            ),
+        ],
+    );
+    let getters = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("rename-getter "))
+            .collect()
+    };
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "opt-in = [\"rename-getter\"]\n",
+    )
+    .unwrap();
+    // A `pub` field, a crate-visible one read in the crate, a private one
+    // read only in its module, one only tests read, and a record's: the
+    // getter adds nothing, as for the binary's `Tool::w`, which nothing
+    // calls. `width`, which `grow` maintains, `entries` and `items`, which
+    // `Lock::new` and `Sorted::from` sort, and `pos`, which `next` moves,
+    // are read-only accessors another module reads.
+    assert_eq!(
+        getters(keys(&workspace)),
+        [
+            "rename-getter getters::table::Span::start",
+            "rename-getter getters::table::Table::depth",
+            "rename-getter getters::table::Table::label",
+            "rename-getter getters::table::Table::rows",
+            "rename-getter getters::table::Table::seed",
+            "rename-getter getters::tool::Tool::w",
+        ]
+    );
+    // Published, a library's `pub` getter has callers outside: only tests
+    // calling it, or callers in reach of its field, are no reason.
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        format!("{manifest}[workspace]\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        getters(keys(&workspace)),
+        [
+            "rename-getter getters::table::Span::start",
+            "rename-getter getters::table::Table::label",
+            "rename-getter getters::table::Table::rows",
+            "rename-getter getters::tool::Tool::w",
+        ]
+    );
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        format!("{manifest}publish = false\n[workspace]\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "opt-in = [\"rename-getter\"]\n[rename-getter]\nall-private-fields = true\n",
+    )
+    .unwrap();
+    assert_eq!(
+        getters(keys(&workspace)),
+        [
+            "rename-getter getters::table::Cursor::pos",
+            "rename-getter getters::table::Lock::entries",
+            "rename-getter getters::table::Sorted::items",
+            "rename-getter getters::table::Span::start",
+            "rename-getter getters::table::Table::depth",
+            "rename-getter getters::table::Table::label",
+            "rename-getter getters::table::Table::rows",
+            "rename-getter getters::table::Table::seed",
+            "rename-getter getters::table::Table::width",
+            "rename-getter getters::tool::Tool::w",
         ]
     );
 }

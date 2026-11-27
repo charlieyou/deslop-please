@@ -61,6 +61,8 @@ pub struct Settings {
     /// The lints that report nothing unless named here: `rename-getter`,
     /// `one-use-args`, `inner-split`, `redundant-reexport`.
     pub opt_in: Vec<String>,
+    /// Which getters `rename-getter` reports.
+    pub rename_getter: RenameGetter,
     /// Which copies of a body are no duplicates.
     pub duplicate_code: DuplicateCode,
     /// How `--update-allow` and `--allow` treat the allowlist.
@@ -69,6 +71,16 @@ pub struct Settings {
     /// even empty, it makes an item that a `cfg` attribute builds only for
     /// `test` or these features test code, as a module is.
     pub test_features: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct RenameGetter {
+    /// Every getter of a private field, not only those that add nothing
+    /// to reading the field: one its callers could read already, one only
+    /// its own module or tests call, or one of a record whose other fields
+    /// are public.
+    pub all_private_fields: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

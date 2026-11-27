@@ -109,7 +109,11 @@ consumers = ["crates/gpu", "../app/crates/app-solver"]
 
 # Lints that report nothing unless named here:
 # - `rename-getter`: a method whose body is only one of its type's fields,
-#   `self.f`, `&self.f` or `&self.f[..]`, under the field's name or another.
+#   `self.f`, `&self.f` or `&self.f[..]`, under the field's name or another,
+#   that adds nothing to reading the field: only tests call it, or nothing;
+#   every caller can read the field, `pub` or in reach of its module; or its
+#   type is a record, whose other fields are as visible as the getter and
+#   whose only methods are getters.
 # - `one-use-args`: a struct built in one place and read, field by field,
 #   only by the one function it is built for.
 # - `inner-split`: a private function called by one other, which takes no
@@ -125,6 +129,11 @@ opt-in = ["rename-getter", "redundant-reexport"]
 # "test-utils"))] pub fn fixture()` is no candidate for `test-only-pub`, and
 # what it uses, tests use.
 test-features = ["test-utils"]
+
+[rename-getter]
+# Report every getter of a private field, also a read-only accessor of a
+# field that its type's constructors and methods maintain. Default false.
+all-private-fields = true
 
 # Hot code that numeric work makes wide and long, held to finite limits of
 # its own: no lint is off for it. A path, relative to the workspace's root,
