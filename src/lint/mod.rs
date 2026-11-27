@@ -59,6 +59,10 @@ pub enum EncapsulationLint {
     FeatureEnvy,
     PassThrough,
     ReexportSprawl,
+    RenameGetter,
+    OneUseArgs,
+    InnerSplit,
+    RedundantReexport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -108,6 +112,10 @@ impl Lint {
                 EncapsulationLint::FeatureEnvy => "feature-envy",
                 EncapsulationLint::PassThrough => "pass-through",
                 EncapsulationLint::ReexportSprawl => "reexport-sprawl",
+                EncapsulationLint::RenameGetter => "rename-getter",
+                EncapsulationLint::OneUseArgs => "one-use-args",
+                EncapsulationLint::InnerSplit => "inner-split",
+                EncapsulationLint::RedundantReexport => "redundant-reexport",
             },
             Lint::Size(s) => match s {
                 SizeLint::WideType => "wide-type",
@@ -149,6 +157,10 @@ impl Lint {
             "feature-envy" => Some(Lint::Encapsulation(EncapsulationLint::FeatureEnvy)),
             "pass-through" => Some(Lint::Encapsulation(EncapsulationLint::PassThrough)),
             "reexport-sprawl" => Some(Lint::Encapsulation(EncapsulationLint::ReexportSprawl)),
+            "rename-getter" => Some(Lint::Encapsulation(EncapsulationLint::RenameGetter)),
+            "one-use-args" => Some(Lint::Encapsulation(EncapsulationLint::OneUseArgs)),
+            "inner-split" => Some(Lint::Encapsulation(EncapsulationLint::InnerSplit)),
+            "redundant-reexport" => Some(Lint::Encapsulation(EncapsulationLint::RedundantReexport)),
             "wide-type" => Some(Lint::Size(SizeLint::WideType)),
             "wide-module" => Some(Lint::Size(SizeLint::WideModule)),
             "wide-struct" => Some(Lint::Size(SizeLint::WideStruct)),
@@ -190,11 +202,11 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// How much of what its lint limits it has, which an allowlist entry's
     /// ceiling caps: a bar's length, the functions a module shows, the
-    /// places that know a field. `None` for a circle or an arrow, which
-    /// have no size to cap, and for a visibility lint, whose item is either
-    /// too visible or not.
+    /// places that know a field, a struct's fields that are too visible.
+    /// `None` for a circle or an arrow, which have no size to cap, and for
+    /// a visibility lint of one item, which is either too visible or not.
     pub fn measure(&self) -> Option<usize> {
-        if matches!(self.lint, Lint::Surface(_)) {
+        if matches!(self.lint, Lint::Surface(_)) && !matches!(self.picture, Picture::Bar { .. }) {
             return None;
         }
         match &self.picture {

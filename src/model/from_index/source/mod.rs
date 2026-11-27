@@ -17,13 +17,31 @@ pub use uses::{Access, Mutation, Plain, owned_type, type_name};
 
 use std::collections::HashSet;
 
-use crate::model::{Codegen, FunctionMetrics, ItemKind};
+use crate::model::{Codegen, FunctionMetrics, ItemKind, Visibility};
 use crate::scip::{Position, Range};
 use tokens::{Kind, Token};
 
 /// What holds a value and is peeled off a type to reach it: `Rc<RefCell<T>>` holds a `T`.
 const HOLDERS: [&str; 8] = [
     "Option", "Cell", "RefCell", "Rc", "Arc", "Box", "Mutex", "RwLock",
+];
+
+/// The kinds of a `macro_rules!` fragment, as in `$x:expr`.
+const FRAGMENTS: [&str; 14] = [
+    "block",
+    "expr",
+    "expr_2021",
+    "ident",
+    "item",
+    "lifetime",
+    "literal",
+    "meta",
+    "pat",
+    "pat_param",
+    "path",
+    "stmt",
+    "tt",
+    "ty",
 ];
 
 /// Types and what a getter of one may hand out instead: what it dereferences
@@ -75,8 +93,8 @@ pub struct Macros {
     /// By macro: each trait, by its last name, that its body writes
     /// `impl Trait for` of.
     pub impls: Vec<(String, String)>,
-    /// The name of each macro invoked, once per invocation.
-    pub invoked: Vec<String>,
+    /// The name of each macro invoked, once per invocation, and where.
+    pub invoked: Vec<(String, Range)>,
     /// Each body's code that the index does not see: the types it writes
     /// `impl` blocks of, by their last names, and the names it writes.
     pub bodies: Vec<MacroBody>,
@@ -85,11 +103,29 @@ pub struct Macros {
 /// A `macro_rules!` body, which only its expansions resolve.
 #[derive(Debug, PartialEq, Eq)]
 pub struct MacroBody {
+    /// The macro's name.
+    pub name: String,
     pub range: Range,
     /// The types it writes `impl X` or `impl Trait for X` of.
     pub types: Vec<String>,
     /// The names of members it uses: see [`Source::used_names`].
     pub names: HashSet<String>,
+    /// The names it writes that are no member's, its own metavariables',
+    /// a fragment's kind, a label's before `:` or a local's it binds: `walk`
+    /// in `walk::<_, $flags>(ctx)`.
+    pub words: HashSet<String>,
+    /// The paths it writes, of two names or more, or of one after `$crate`,
+    /// `crate`, `self` or `super`, without those: `tree::copy_table::CopyValue`,
+    /// `helper` in `$crate::helper()`.
+    pub paths: Vec<Vec<String>>,
+    /// The paths that the associated types of its trait `impl` blocks
+    /// write, as [`MacroBody::paths`] are but of one name too:
+    /// `UnknownCategoryId` in `type Err = UnknownCategoryId;`, `errors::Bad`
+    /// and `Box` in `type Err = Box<$crate::errors::Bad>;`.
+    pub assoc_types: Vec<Vec<String>>,
+    /// The widest visibility of a struct, enum or union it declares: what
+    /// its trait `impl`s' associated types must have when they are for it.
+    pub declares: Option<Visibility>,
 }
 
 /// Parsed pieces of an `impl` block header before its `{`.
@@ -119,6 +155,9 @@ pub struct Written {
     pub in_signature: bool,
     /// It names the type of a struct literal with a base: `T { a, ..base }`.
     pub struct_update: bool,
+    /// It names a member of what a member access or a call before it gives:
+    /// `shared` and `config` in `subgame.inner().shared.config`.
+    pub chained: bool,
 }
 
 /// What a function's text says about it.
@@ -136,6 +175,9 @@ pub struct FunctionText {
     /// parameter, and what it returns lends nothing to write: what it lends
     /// can only be read.
     pub lends_to_read: bool,
+    /// Its body is only a field of `self`, borrowed or not: `self.head`,
+    /// `&self.items`, `&mut self.items` or `&self.items[..]`.
+    pub bare: bool,
     /// What comes before the body, as [`normalized`] tokens.
     signature: Vec<String>,
 }
@@ -253,10 +295,16 @@ impl Source {
                         continue;
                     };
                     let body = &tokens[at + 3..close];
+                    let (words, paths) = self.macro_words(body);
                     let mut written = MacroBody {
+                        name: self.text(*name).to_owned(),
                         range: self.range(tokens[at].start, tokens[close].end),
                         names: self.used_names(body),
                         types: Vec::new(),
+                        words,
+                        paths,
+                        assoc_types: Vec::new(),
+                        declares: self.declares(body),
                     };
                     for (index, word) in body.iter().enumerate() {
                         // An `impl` that starts an item, not `x: impl Trait`,
@@ -318,16 +366,166 @@ impl Source {
                         {
                             written.types.push(named);
                         }
+                        if has_for {
+                            written.assoc_types.extend(self.assoc_types(&body[index..]));
+                        }
                     }
                     macros.bodies.push(written);
                 }
                 Some(open) if !defines && open.kind == Kind::Open => {
-                    macros.invoked.push(self.text(*token).to_owned());
+                    let at = self.range(token.start, token.end);
+                    macros.invoked.push((self.text(*token).to_owned(), at));
                 }
                 _ => {}
             }
         }
         macros
+    }
+
+    /// The names that `body`, a macro's, writes that are not after `.`, a
+    /// metavariable's or a fragment's kind, and its paths of two names or
+    /// more: see [`MacroBody`].
+    fn macro_words(&self, body: &[Token]) -> (HashSet<String>, Vec<Vec<String>>) {
+        let mut words = HashSet::new();
+        // Locals it binds, and names it calls or writes a path through,
+        // which no local is: a local's name is dropped only when the body
+        // surely writes no item of that name.
+        let (mut locals, mut called) = (HashSet::new(), HashSet::new());
+        let mut paths = Vec::new();
+        let mut path: Vec<String> = Vec::new();
+        // The path is from the crate's root, `$crate::`, `crate::`, or a
+        // module's, `self::` or `super::`: one name of it is a path too.
+        let mut rooted = false;
+        let text = |at: usize| body.get(at).map(|t| self.text(*t));
+        for (at, token) in body.iter().enumerate() {
+            let before = at.checked_sub(1).and_then(text);
+            let after = text(at + 1);
+            let name = self.text(*token);
+            if token.kind == Kind::Ident {
+                // `let total = ..`, `let mut total: u32;`, `for lane in ..`.
+                let after_let = before == Some("let")
+                    || (before == Some("mut") && at.checked_sub(2).and_then(text) == Some("let"));
+                if (after_let && matches!(after, Some("=" | ":" | ";")))
+                    || (before == Some("for") && after == Some("in"))
+                {
+                    locals.insert(name);
+                }
+                if matches!(after, Some("(" | "::")) {
+                    called.insert(name);
+                }
+            }
+            // What it defines, `fn walk`, and a label, `width: 2`, name no
+            // item there.
+            let defines = matches!(
+                before,
+                Some(
+                    "fn" | "const"
+                        | "static"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "trait"
+                        | "type"
+                        | "mod"
+                )
+            ) || after == Some(":");
+            let fragment = before == Some(":")
+                && at
+                    .checked_sub(3)
+                    .and_then(text)
+                    .is_some_and(|word| word == "$")
+                && FRAGMENTS.contains(&name);
+            let word = token.kind == Kind::Ident
+                && !matches!(before, Some("." | "$"))
+                && !fragment
+                && !matches!(name, "crate" | "self" | "super" | "Self");
+            if word {
+                if !defines {
+                    words.insert(name.to_owned());
+                }
+                if before != Some("::") {
+                    path.clear();
+                }
+                if path.is_empty() {
+                    rooted = before == Some("::")
+                        && at
+                            .checked_sub(2)
+                            .and_then(text)
+                            .is_some_and(|word| matches!(word, "crate" | "self" | "super"));
+                }
+                path.push(name.to_owned());
+            } else if !(self.is(*token, "::") || (path.is_empty() && before == Some("$"))) {
+                if path.len() > 1 || (rooted && !path.is_empty()) {
+                    paths.push(std::mem::take(&mut path));
+                }
+                path.clear();
+            }
+        }
+        if path.len() > 1 || (rooted && !path.is_empty()) {
+            paths.push(path);
+        }
+        words.retain(|word| !locals.contains(word.as_str()) || called.contains(word.as_str()));
+        (words, paths)
+    }
+
+    /// The paths that the associated types of the `impl` block starting at
+    /// `block`'s first token write: see [`MacroBody::assoc_types`].
+    fn assoc_types(&self, block: &[Token]) -> Vec<Vec<String>> {
+        let Some(open) = block.iter().position(|t| self.is(*t, "{")) else {
+            return Vec::new();
+        };
+        let Some(close) = self.matching_in(block, open) else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        for at in open + 1..close {
+            if !self.is(block[at], "type") {
+                continue;
+            }
+            let Some(equals) =
+                (at..close).find(|&at| self.is(block[at], "=") || self.is(block[at], ";"))
+            else {
+                continue;
+            };
+            if !self.is(block[equals], "=") {
+                continue;
+            }
+            let mut path: Vec<String> = Vec::new();
+            for token in &block[equals + 1..close] {
+                match self.text(*token) {
+                    ";" => break,
+                    "::" | "$" | "crate" | "self" | "super" | "Self" | "dyn" | "mut" => {}
+                    word if token.kind == Kind::Ident => path.push(word.to_owned()),
+                    _ if !path.is_empty() => paths.push(std::mem::take(&mut path)),
+                    _ => {}
+                }
+            }
+            if !path.is_empty() {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
+    /// The widest visibility of a struct, enum or union that `body`
+    /// declares, if it declares one. A metavariable's, `$vis`, may be `pub`.
+    fn declares(&self, body: &[Token]) -> Option<Visibility> {
+        body.iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(self.text(**t), "struct" | "enum" | "union"))
+            .map(|(at, _)| {
+                let before = |back: usize| at.checked_sub(back).map(|at| self.text(body[at]));
+                match (before(1), before(2)) {
+                    (Some("pub"), _) | (Some(_), Some("$")) => Visibility::Pub,
+                    (Some(")"), _) => body[..at]
+                        .iter()
+                        .rposition(|t| self.is(*t, "("))
+                        .filter(|&open| open > 0 && self.is(body[open - 1], "pub"))
+                        .map_or(Visibility::Private, |_| Visibility::Restricted),
+                    _ => Visibility::Private,
+                }
+            })
+            .max()
     }
 
     /// The names of members that `body` uses: after `.` or `::`, as
@@ -380,6 +578,30 @@ impl Source {
             in_signature: holder
                 .is_some_and(|(holder, kind)| self.in_signature(holder, kind, name)),
             struct_update: self.struct_update(name),
+            chained: self.chained(name),
+        }
+    }
+
+    /// Whether the name at `name` follows a `.` after what is no variable:
+    /// a call, an index, a `?`, a tuple's field or another member.
+    fn chained(&self, name: Range) -> bool {
+        let tokens = &self.tokens;
+        let Some(offset) = self.offset(name.start) else {
+            return false;
+        };
+        let at = tokens.partition_point(|token| token.start < offset);
+        let text = |back: usize| at.checked_sub(back).map(|at| self.text(tokens[at]));
+        if text(1) != Some(".") {
+            return false;
+        }
+        match at.checked_sub(2).map(|at| tokens[at]) {
+            Some(receiver) if receiver.kind == Kind::Ident => text(3) == Some("."),
+            Some(receiver) => {
+                receiver.kind == Kind::Close
+                    || receiver.kind == Kind::Literal
+                    || self.is(receiver, "?")
+            }
+            None => false,
         }
     }
 
@@ -506,6 +728,7 @@ impl Source {
         let params = self.count_non_self_params(param_tokens);
         let first_type = self.first_param_type_in(param_tokens);
         let positional_trap = metrics::positional_trap(&self.text, param_tokens);
+        let same_type_run = metrics::same_type_run(&self.text, param_tokens);
 
         let last = tokens.len().checked_sub(1)?;
         let body_open = if self.is(tokens[last], "}") {
@@ -582,6 +805,7 @@ impl Source {
                 returns_string_error,
                 body_fingerprint,
                 positional_trap,
+                same_type_run,
                 codegen: Codegen {
                     intrinsics: body_tokens.iter().enumerate().any(|(at, t)| {
                         let word = self.text(*t);
@@ -592,9 +816,55 @@ impl Source {
                     ..self.codegen(&tokens[..fn_pos])
                 },
                 decides,
+                passes_on: body_open.is_some()
+                    && open == fn_pos + 2
+                    && !param_tokens.iter().any(|t| self.is(*t, "impl"))
+                    && !tokens[close..header_end]
+                        .iter()
+                        .any(|t| self.is(*t, "where"))
+                    && self.passes_on(body_tokens),
             },
             first_type,
         ))
+    }
+
+    /// Whether `body`, a function's, is one call whose arguments call
+    /// nothing: see [`FunctionMetrics::passes_on`].
+    fn passes_on(&self, body: &[Token]) -> bool {
+        let body = match body.split_last() {
+            Some((last, rest)) if self.is(*last, ";") => rest,
+            _ => body,
+        };
+        let Some(open) = body.iter().position(|t| self.is(*t, "(")) else {
+            return false;
+        };
+        let callee = &body[..open];
+        let path = !callee.is_empty()
+            && callee.iter().all(|t| {
+                t.kind == Kind::Ident || matches!(self.text(*t), "::" | "." | "<" | ">" | ",")
+            });
+        let arguments = &body[open + 1..body.len() - 1];
+        // A borrow, a dereference or a negative literal, `&mut x`, `*x`,
+        // `-1`, starts an argument; between operands they compute.
+        let starts = |at: usize| {
+            at.checked_sub(1).is_none_or(|before| {
+                matches!(self.text(arguments[before]), "," | "&" | "*" | "mut")
+            })
+        };
+        let plain = |at: usize, t: &Token| match self.text(*t) {
+            "as" => false,
+            "," | "." | "::" => true,
+            "&" | "*" => starts(at),
+            "-" => {
+                starts(at)
+                    && arguments
+                        .get(at + 1)
+                        .is_some_and(|t| t.kind == Kind::Literal)
+            }
+            _ => matches!(t.kind, Kind::Ident | Kind::Literal),
+        };
+        path && self.matching_in(body, open) == Some(body.len() - 1)
+            && arguments.iter().enumerate().all(|(at, t)| plain(at, t))
     }
 
     /// What the attributes among `tokens`, those before a function's `fn`,
@@ -753,6 +1023,7 @@ impl Source {
             whole: hands_out.whole,
             returns_copies: hands_out.copies,
             lends_to_read: hands_out.to_read,
+            bare: self.bare(body),
             signature,
         })
     }
@@ -806,6 +1077,20 @@ impl Source {
             tokens = &tokens[2..];
         }
         tokens
+    }
+
+    /// Whether `body` is only a field of `self`: see [`FunctionText::bare`].
+    fn bare(&self, body: &[Token]) -> bool {
+        let words: Vec<&str> = body.iter().map(|token| self.text(*token)).collect();
+        let field = match &words[..] {
+            ["&", "mut", rest @ ..] | ["&", rest @ ..] => rest,
+            rest => rest,
+        };
+        let field = match field {
+            [rest @ .., "[", "..", "]"] if words[0] == "&" => rest,
+            rest => rest,
+        };
+        matches!(field, ["self", ".", _])
     }
 
     fn text(&self, token: Token) -> &str {

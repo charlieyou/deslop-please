@@ -116,6 +116,38 @@ fn a_ceiling_only_falls_and_a_reason_and_comments_stay_through_updates_and_prune
             .contains("error[long-function]: `new` is long")
     );
     assert!(!pruned.stdout.contains("stale-allow"));
+
+    // A merge by union brings a line back: it allows, but a strict run
+    // fails on it and a prune takes it out.
+    std::fs::write(
+        &path,
+        "long-function debt::a::plan <= 155  # the planner\nlong-function debt::c::new\n\
+         long-function debt::a::plan <= 160  # an older reason\n",
+    )
+    .unwrap();
+    assert_eq!(run(&workspace, &["--allow", allow]).code, Some(0));
+    let twice = run(&workspace, &["--allow", allow, "--strict-allow"]);
+    assert_eq!(twice.code, Some(1));
+    assert!(
+        twice
+            .stdout
+            .contains("- long-function debt::a::plan <= 160  # an older reason: listed twice\n"),
+        "{}",
+        twice.stdout
+    );
+    let prune = run(&workspace, &["--prune-allow", allow]);
+    assert!(prune.stderr.contains("(listed twice)"), "{}", prune.stderr);
+    assert_eq!(
+        entries(&path),
+        [
+            "long-function debt::a::plan <= 155  # the planner",
+            "long-function debt::c::new"
+        ]
+    );
+    assert_eq!(
+        run(&workspace, &["--allow", allow, "--strict-allow"]).code,
+        Some(0)
+    );
 }
 
 #[test]

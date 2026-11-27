@@ -11,6 +11,7 @@ pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::{HashMap, HashSet};
 
+use crate::scip::Range;
 use crate::settings::Settings;
 use crate::workspace::TargetKind;
 
@@ -57,6 +58,9 @@ pub struct TraitImpl {
     /// for a type outside the workspace and a blanket `impl<T> Trait for T`.
     /// A macro's `impl` counts as for a type of its own package.
     pub self_package: Option<NodeId>,
+    /// Where its block is written, from `impl` to the closing brace; `None`
+    /// for a macro's, which the index sees no block of.
+    pub block: Option<(FileId, Range)>,
 }
 
 /// Normalized structural fingerprint of a function body for clone detection.
@@ -85,11 +89,16 @@ pub struct FunctionMetrics {
     pub returns_string_error: bool,
     pub body_fingerprint: Option<BodyFingerprint>,
     pub positional_trap: Option<PositionalTrap>,
+    /// The longest run of adjacent parameters of one type, of any type.
+    pub same_type_run: u16,
     /// How its attributes ask the compiler to build it.
     pub codegen: Codegen,
     /// Its body decides or supplies something of its own: an `if`, a
     /// `match`, or a literal, which no forwarder has.
     pub decides: bool,
+    /// It takes no type parameters, and its body is one call whose
+    /// arguments call nothing: `run_inner(a, &b.c, -1)`, `self.walk(x);`.
+    pub passes_on: bool,
 }
 
 /// Attributes that change how a function is compiled, not what it does.
@@ -125,6 +134,11 @@ pub struct Mention {
     pub test: bool,
     /// Where in the workspace it is, if it is: its file and module.
     pub from: Option<(FileId, NodeId)>,
+    /// The visibility of an interface the index does not see that names
+    /// it, which it must have too (E0446): of a type a `macro_rules!` body
+    /// declares, when an associated type of the body's trait `impl` for it
+    /// names the item.
+    pub pins: Option<Visibility>,
 }
 
 /// An item that a plain `pub use` declaration names.
@@ -133,6 +147,8 @@ pub struct Reexport {
     pub item: ItemId,
     pub file: FileId,
     pub line: u32,
+    /// The module the declaration is written in.
+    pub module: NodeId,
 }
 
 /// A `pub use <path>::*;` or `pub(...) use <path>::*;` declaration written in a module.
@@ -291,6 +307,10 @@ pub struct Reference {
     /// It names a type in a struct literal with a base, `T { a, ..base }`,
     /// which moves every field it does not write: each must be visible there.
     pub struct_update: bool,
+    /// It names a member of what a member access or a call before it gives,
+    /// whose type the code need not name: `shared` and `config` in
+    /// `subgame.inner().shared.config`.
+    pub chained: bool,
 }
 
 /// A function that adds nothing of its own.
@@ -310,6 +330,8 @@ pub enum Wrapper {
         copied: Vec<ItemId>,
         to_read: bool,
         whole: bool,
+        /// Its body is only the field, borrowed or not: `&self.items`.
+        bare: bool,
     },
 }
 
@@ -478,6 +500,7 @@ pub mod tests {
                 test: false,
                 in_signature: false,
                 struct_update: false,
+                chained: false,
             });
         }
 

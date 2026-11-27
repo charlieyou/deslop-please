@@ -21,47 +21,164 @@ use super::{
 use crate::graph::{Graph, ThingId, Use};
 use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility};
 
-pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
-    let mut fields: BTreeMap<ThingId, Vec<ItemId>> = BTreeMap::new();
-    for (index, item) in model.items.iter().enumerate() {
-        let of_struct = item
-            .parent
-            .is_some_and(|parent| model.items[parent.index()].kind == ItemKind::Type);
-        if item.kind == ItemKind::Field
-            && of_struct
-            && !item.holds_nothing
-            && let Some(thing) = graph.thing_of[index]
-        {
-            fields.entry(thing).or_default().push(ItemId::new(index));
+/// What `field-leak` reads of the workspace: each struct's fields, the
+/// uses of each field by outsiders, and the structs with a method of their
+/// own that works on their fields.
+struct Survey<'a> {
+    fields: BTreeMap<ThingId, Vec<ItemId>>,
+    outside: HashMap<ItemId, Vec<&'a Use>>,
+    working: HashSet<ThingId>,
+}
+
+impl<'a> Survey<'a> {
+    fn of(model: &Model, graph: &'a Graph) -> Survey<'a> {
+        let mut fields: BTreeMap<ThingId, Vec<ItemId>> = BTreeMap::new();
+        for (index, item) in model.items.iter().enumerate() {
+            let of_struct = item
+                .parent
+                .is_some_and(|parent| model.items[parent.index()].kind == ItemKind::Type);
+            if item.kind == ItemKind::Field
+                && of_struct
+                && !item.holds_nothing
+                && let Some(thing) = graph.thing_of[index]
+            {
+                fields.entry(thing).or_default().push(ItemId::new(index));
+            }
+        }
+        let mut outside: HashMap<ItemId, Vec<&Use>> = HashMap::new();
+        let mut working: HashSet<ThingId> = HashSet::new();
+        for usage in &graph.uses {
+            let field = &model.items[usage.item.index()];
+            let Some(owner) =
+                graph.thing_of[usage.item.index()].filter(|_| field.kind == ItemKind::Field)
+            else {
+                continue;
+            };
+            if model.in_example(Some(model.references[usage.reference].file)) {
+                continue;
+            }
+            let tangle = graph.tangle_of[owner.index()];
+            let insider = usage.user.is_some_and(|user| {
+                user == owner || (tangle.is_some() && graph.tangle_of[user.index()] == tangle)
+            }) || (field.visibility == Visibility::Private
+                && at_home(model, graph, usage));
+            if !insider {
+                outside.entry(usage.item).or_default().push(usage);
+            } else if usage.user == Some(owner) && works(model, usage) {
+                working.insert(owner);
+            }
+        }
+        Survey {
+            fields,
+            outside,
+            working,
         }
     }
-    let policy = &model.settings.field_leak;
-    let mut outside: HashMap<ItemId, Vec<&Use>> = HashMap::new();
-    let mut working: HashSet<ThingId> = HashSet::new();
-    for usage in &graph.uses {
-        let field = &model.items[usage.item.index()];
-        let Some(owner) =
-            graph.thing_of[usage.item.index()].filter(|_| field.kind == ItemKind::Field)
-        else {
-            continue;
+
+    /// Whether `field-leak` reports fields of `thing`, a struct with
+    /// `fields`, if `narrowed`, some of them, were one step less visible:
+    /// private from `pub(crate)`, `pub(crate)` from `pub`.
+    fn reports(&self, model: &Model, graph: &Graph, thing: ThingId, narrowed: &[ItemId]) -> bool {
+        let fields = &self.fields[&thing];
+        let policy = &model.settings.field_leak;
+        let visibility = |field: ItemId| {
+            let visibility = model.items[field.index()].visibility;
+            match (narrowed.contains(&field), visibility) {
+                (true, Visibility::Pub) => Visibility::Restricted,
+                (true, _) => Visibility::Private,
+                (false, visibility) => visibility,
+            }
         };
-        if model.in_example(Some(model.references[usage.reference].file)) {
+        // A field narrowed to private is its home module's to use.
+        let outsiders = |field: ItemId| -> Vec<&Use> {
+            let uses = self.outside.get(&field).into_iter().flatten().copied();
+            if narrowed.contains(&field) && visibility(field) == Visibility::Private {
+                uses.filter(|usage| !at_home(model, graph, usage)).collect()
+            } else {
+                uses.collect()
+            }
+        };
+        let kept = fields.iter().any(|&field| outsiders(field).is_empty());
+        let plain = policy.plain_data
+            && fields
+                .iter()
+                .all(|&field| visibility(field) == Visibility::Pub);
+        if !kept || !self.working.contains(&thing) || plain {
+            return false;
+        }
+        let serde = model.is_serde(graph.things[thing.index()].item);
+        fields
+            .iter()
+            .any(|&field| !leaks(model, outsiders(field), serde).is_empty())
+    }
+}
+
+/// Of `uses`, a field's by outsiders, those it leaks by: those that do
+/// more than read its value, and of a serde schema's, only when one
+/// mutates it.
+fn leaks<'a>(model: &Model, uses: Vec<&'a Use>, serde: bool) -> Vec<&'a Use> {
+    let uses: Vec<&Use> = uses.into_iter().filter(|usage| !usage.copies).collect();
+    if serde
+        && !uses
+            .iter()
+            .any(|usage| model.references[usage.reference].mutates)
+    {
+        return Vec::new();
+    }
+    uses
+}
+
+/// Whether `usage` is in the home module of the type it uses a field of,
+/// which `home-module` makes an insider for a private field.
+fn at_home(model: &Model, graph: &Graph, usage: &Use) -> bool {
+    let Some(owner) = graph.thing_of[usage.item.index()] else {
+        return false;
+    };
+    model.settings.field_leak.home_module
+        && model.references[usage.reference].from == graph.things[owner.index()].home
+}
+
+/// Of `over`, fields that `over-public` would ask to narrow, those it must
+/// not: narrowed one step, each would make `field-leak` report fields of
+/// its struct, which it does not now. With `home-module`, a struct that
+/// keeps no field keeps one that only its module uses, once it is private,
+/// and then its other fields that outsiders use leak. When narrowing all
+/// of a struct's together makes no report, none is held: each that only
+/// its module uses is kept, but none is left to leak.
+pub fn narrowing_leaks(model: &Model, graph: &Graph, over: &HashSet<ItemId>) -> HashSet<ItemId> {
+    let survey = Survey::of(model, graph);
+    let mut held = HashSet::new();
+    for (&thing, fields) in &survey.fields {
+        let candidates: Vec<ItemId> = fields
+            .iter()
+            .copied()
+            .filter(|field| over.contains(field))
+            .collect();
+        if candidates.is_empty()
+            || survey.reports(model, graph, thing, &[])
+            || !survey.reports(model, graph, thing, &candidates)
+        {
             continue;
         }
-        let tangle = graph.tangle_of[owner.index()];
-        let insider = usage.user.is_some_and(|user| {
-            user == owner || (tangle.is_some() && graph.tangle_of[user.index()] == tangle)
-        }) || (policy.home_module
-            && field.visibility == Visibility::Private
-            && model.references[usage.reference].from == graph.things[owner.index()].home);
-        if !insider {
-            outside.entry(usage.item).or_default().push(usage);
-        } else if usage.user == Some(owner) && works(model, usage) {
-            working.insert(owner);
-        }
+        // Narrowing what is left together then makes no report either: a
+        // field that one alone makes kept would make it alone, with more
+        // left to leak.
+        held.extend(
+            candidates
+                .iter()
+                .copied()
+                .filter(|&field| survey.reports(model, graph, thing, &[field])),
+        );
     }
+    held
+}
+
+pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
+    let survey = Survey::of(model, graph);
+    let policy = &model.settings.field_leak;
     let mut diagnostics = Vec::new();
-    for (thing, fields) in fields {
+    for (&thing, fields) in &survey.fields {
+        let outside = &survey.outside;
         let kept = fields.iter().any(|field| !outside.contains_key(field));
         let type_item = graph.things[thing.index()].item;
         let is_serde = model.is_serde(type_item);
@@ -72,29 +189,16 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             && fields
                 .iter()
                 .all(|field| model.items[field.index()].visibility == Visibility::Pub);
-        if !kept || !working.contains(&thing) || plain {
-            if let Some(diag) = shared_mutable_bag(model, graph, thing, &fields, &outside, scope) {
+        if !kept || !survey.working.contains(&thing) || plain {
+            if let Some(diag) = shared_mutable_bag(model, graph, thing, fields, outside, scope) {
                 diagnostics.push(diag);
             }
             continue;
         }
-        for &field in &fields {
-            let uses: Vec<&Use> = outside
-                .get(&field)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|usage| !usage.copies)
-                .collect();
+        for &field in fields {
+            let all = outside.get(&field).cloned().unwrap_or_default();
+            let uses = leaks(model, all, is_serde);
             if uses.is_empty() {
-                continue;
-            }
-            // Serde DTOs/configs are plain schemas unless outsiders mutate their fields.
-            if is_serde
-                && !uses
-                    .iter()
-                    .any(|usage| model.references[usage.reference].mutates)
-            {
                 continue;
             }
             let home = graph.things[thing.index()].home;
@@ -103,7 +207,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                     in_scope(&model.tree, scope, model.references[usage.reference].from)
                 });
             if concerned {
-                let others = others(model, field, &fields, &outside);
+                let others = others(model, field, fields, outside);
                 diagnostics.push(diagnostic(model, graph, thing, field, &uses, others));
             }
         }
@@ -124,6 +228,12 @@ fn shared_mutable_bag(
 ) -> Option<Diagnostic> {
     let tree = &model.tree;
     let home = graph.things[thing.index()].home;
+    let item = graph.things[thing.index()].item;
+    if model.settings.shared_mutable_bag.deserialized_records
+        && model.derives(item, &["Deserialize"])
+    {
+        return None;
+    }
     let mut mutating_modules: BTreeMap<NodeId, BTreeSet<Location>> = BTreeMap::new();
     let mut mutated_fields: BTreeSet<String> = BTreeSet::new();
     let mut sites: BTreeMap<Location, String> = BTreeMap::new();
@@ -403,6 +513,7 @@ mod tests {
             copied: if copies { vec![head] } else { vec![] },
             to_read: true,
             whole: false,
+            bare: true,
         };
         sample.model.wrappers.insert(getter, hands_out(false));
         let drained = sample.item(queue, "drained", ItemKind::Function);
@@ -430,6 +541,7 @@ mod tests {
             copied: vec![],
             to_read: true,
             whole: false,
+            bare: true,
         };
         sample.model.wrappers.insert(getter, lends);
         // `*queue.head()`

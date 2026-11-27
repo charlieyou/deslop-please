@@ -88,6 +88,7 @@ impl<'a> Builder<'a> {
             copied,
             to_read: text.lends_to_read,
             whole: text.whole,
+            bare: text.bare,
         })
     }
 

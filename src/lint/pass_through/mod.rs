@@ -7,6 +7,10 @@
 //! 3. A `pub use <path>::*;` glob re-export of an external crate, non-child
 //!    module, or already-`pub` child module (private-child splits like
 //!    `mod parts; pub use parts::*;` are allowed).
+//!
+//! [`indirection`] holds the indirections that `opt-in` must name.
+
+mod indirection;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -25,6 +29,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
     check_wrappers(model, graph, scope, &mut diagnostics);
     check_glob_reexports(model, scope, &mut diagnostics);
     check_reexport_sprawl(model, scope, &mut diagnostics);
+    diagnostics.extend(indirection::check(model, graph, scope));
     diagnostics
 }
 
@@ -308,6 +313,7 @@ mod tests {
                 copied: vec![],
                 to_read: true,
                 whole: false,
+                bare: true,
             },
         );
 
@@ -320,6 +326,7 @@ mod tests {
                 copied: vec![],
                 to_read: true,
                 whole: false,
+                bare: true,
             },
         );
 

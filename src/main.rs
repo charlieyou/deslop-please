@@ -63,7 +63,9 @@ shallow-module, wide-type, wide-module, wide-struct, wide-enum, scattered-impl,
 unused-pub, test-only-pub, over-public, single-impl-trait, pass-through,
 reexport-sprawl, long-function, wide-signature, positional-trap, string-error,
 duplicate-code, duplicate-struct, high-fan-out, god-hub, feature-envy,
-layer-violation, unused-dep, wide-directory, long-file) on the Cargo workspace.
+layer-violation, unused-dep, wide-directory, long-file) on the Cargo workspace,
+and those that `opt-in` in deslop-please.toml names (rename-getter, one-use-args,
+inner-split, redundant-reexport).
 
 options:
   <crate_or_mod>               check only one crate or module (e.g. my-crate)

@@ -51,19 +51,23 @@ over-public core::fixtures::* <= 12    # a group: up to 12 reports under this mo
 
 - `<= N` is a ceiling on what the report measures: the lines of a function,
   the parameters of a signature, the modules a module uses, the places that
-  know a field. A report above it is an error, and no update raises it.
+  know a field, the fields of a struct that `over-public` reports as one,
+  `<type>.fields`. A report above it is an error, and no update raises it.
   A circle (`tangle`, `module-cycle`, `duplicate-code`, `duplicate-struct`)
   is allowed while its members are among the entry's.
 - `prefix::*` groups `over-public` or `test-only-pub` reports under a module,
-  and needs a ceiling on how many there are.
+  and needs a ceiling on how many there are, each field of a `.fields`
+  report counted.
 - `--update-allow` writes the current reports into the file, keeping its
   comments, reasons and ceilings, prints each entry it adds, and fails if a
   report is above its ceiling. With `[allow] ceilings = true` it writes each
   new entry with what it measures as its ceiling.
 - `--prune-allow` only takes out: entries that allow nothing, ceilings above
-  what they allow, and entries that moved. It adds nothing.
+  what they allow, entries that moved, and lines that list a key twice. It
+  adds nothing.
 - `--allow ... --strict-allow` fails on entries that allow nothing, ceilings
-  above what they allow, and entries that moved. A circle that shrank still
+  above what they allow, entries that moved, and a key listed twice, whatever
+  the ceilings and reasons of its lines. A circle that shrank still
   passes, though `--prune-allow` rewrites its key.
 - With a crate or module, `deslop-please my-crate --allow ...` and the other
   allowlist flags read and change only the entries in its scope.
@@ -72,7 +76,7 @@ over-public core::fixtures::* <= 12    # a group: up to 12 reports under this mo
 
 So that parallel branches add entries without conflicts, let git merge the
 file by union, in `.gitattributes`; `--strict-allow` and `--prune-allow` then
-catch an entry that a merge brings back:
+catch an entry that a merge brings back, or brings in twice:
 
 ```text
 .deslop-please.allow merge=union
@@ -102,6 +106,18 @@ every-member-layered = true
 # Each is indexed too (for the host, with default features), and what its
 # code uses counts as a use from another crate, its tests' as a test's.
 consumers = ["crates/gpu", "../app/crates/app-solver"]
+
+# Lints that report nothing unless named here:
+# - `rename-getter`: a method whose body is only one of its type's fields,
+#   `self.f`, `&self.f` or `&self.f[..]`, under the field's name or another.
+# - `one-use-args`: a struct built in one place and read, field by field,
+#   only by the one function it is built for.
+# - `inner-split`: a private function called by one other, which takes no
+#   type parameters and whose body is only that call.
+# - `redundant-reexport`: a `pub use` in a public module of an item that
+#   another public path of the crate already reaches: where it is defined,
+#   or the shallowest `pub use` that names it there.
+opt-in = ["rename-getter", "redundant-reexport"]
 
 # Features that build code only for tests. Set, even empty, it makes an item
 # that a `cfg` attribute builds only for `test` or one of these features test
@@ -146,9 +162,15 @@ fold-god-hub = true
 # `fold-god-hub`, a hub, a module that 10 or more modules depend on, keeps
 # the default under a looser limit.
 most-by-layer = { core = 20, cli = 25 }
+# The limit below the lowest layer named, and the one a hub keeps; default 15.
+most-modules = 18
 # A use of another crate's module counts as one of its top module,
 # `crate::top_module`; default "module".
 other-crates = "top-module"
+# A module counts as its parent's when the parent is no crate root and holds
+# no part of the module that uses it: `a::b::x` and `a::b::y` count as one,
+# `a::b`. Default false.
+fold-siblings = true
 
 [field-leak]
 # A struct whose fields are all `pub` is plain data, which guards nothing:
@@ -165,11 +187,34 @@ home-module = true
 # nothing (no `&`, `*` or lifetime in it) and is no `Rc`, `Arc`, `RefMut` or
 # guard: `let mut config = Config::new()` does, `s: &mut S` does not.
 owned-locals = true
+# A type deriving `Deserialize` is a record read from a file, whose fields
+# its readers set one by one on purpose.
+deserialized-records = true
 
 [wide-struct]
 passive-records = true # a struct with no method of its own that takes `self` may be wide
-most-passive-fields = 24 # but no wider than this; unset, any width; 15 or less, none
+most-passive-fields = 24 # but no wider than this; unset, any width; `most-fields` or less, none
 clap-derives = true    # so may one deriving clap's `Parser`, `Args` or `Subcommand`
+most-fields = 20       # the most fields any other struct may hold; default 15
+
+[wide-type]
+most-functions = 20    # the most working functions a type may show; default 15
+
+[wide-enum]
+most-variants = 30     # default 25
+
+[wide-signature]
+most-params = 8        # outside the kernel; default 7
+# A private function called from one place, not counting its calls of
+# itself, may take any number: a struct of its parameters would be built
+# once, for that one call.
+single-call-site = true
+
+[positional-trap]
+# Outside a kernel set to "bools", a run of this many adjacent parameters
+# of one type, whatever the type, is a trap too: `a: Vec<u32>, b: Vec<u32>,
+# c: Vec<u32>`. Unset, only `bool`s and runs of 4 of one primitive are.
+same-type-run = 3
 
 [duplicate-code]
 # Copies that each are `#[inline(always)]` or `#[target_feature]` and whose

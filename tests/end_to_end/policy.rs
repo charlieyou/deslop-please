@@ -903,3 +903,390 @@ fn a_member_in_no_layer_is_an_error_when_every_member_must_be_layered() {
     .unwrap();
     assert_eq!(keys(&workspace), ["layer-violation low -> high"]);
 }
+
+#[test]
+fn a_chain_of_members_counts_only_its_first_and_siblings_fold_when_configured() {
+    // `sub::get()` hands out a `Sub`, whose `inner` is a `mid::Inner`, whose
+    // `shared` is a `deep::Shared`.
+    let mut lib = format!(
+        "//! Chains.\n{}\
+         pub mod sub {{ pub struct Sub {{ pub inner: crate::mid::Inner }}\n    \
+         pub fn get() -> Sub {{ Sub {{ inner: crate::mid::Inner {{ shared: crate::deep::Shared {{ config: 1 }} }} }} }} }}\n\
+         pub mod mid {{ pub struct Inner {{ pub shared: crate::deep::Shared }} }}\n\
+         pub mod deep {{ pub struct Shared {{ pub config: u32 }} }}\n",
+        leaves(numbered("m", 15))
+    );
+    let chain = "pub fn h() -> u32 { let sub = crate::sub::get(); sub.inner.shared.config + crate::sub::get().inner.shared.config }";
+    // Through the chain, `r1` names 15 modules and `r2` 16.
+    lib += &user("r1", numbered("crate::m", 14), chain);
+    lib += &user("r2", numbered("crate::m", 15), chain);
+    // `outside` uses 16 modules under `a`, and `a::inside` its 16 siblings.
+    lib += &format!(
+        "pub mod a {{\n{}{}}}\n",
+        leaves(numbered("x", 16)),
+        user("inside", numbered("super::x", 16), "")
+    );
+    lib += &user("outside", numbered("crate::a::x", 16), "");
+    let workspace = scratch_workspace(
+        "fan_out_chains",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"chains\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+        ],
+    );
+    let fanned = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("high-fan-out "))
+            .collect()
+    };
+    assert_eq!(
+        fanned(keys(&workspace)),
+        [
+            "high-fan-out chains::a::inside",
+            "high-fan-out chains::outside",
+            "high-fan-out chains::r2",
+        ]
+    );
+    // Modules under one parent count once, unless it holds the user.
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[high-fan-out]\nfold-siblings = true\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fanned(keys(&workspace)),
+        ["high-fan-out chains::a::inside", "high-fan-out chains::r2"]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[high-fan-out]\nmost-modules = 16\n",
+    )
+    .unwrap();
+    assert_eq!(fanned(keys(&workspace)), Vec::<String>::new());
+    // A crate in the directory of another is no sibling of its modules:
+    // `cli` uses two crates, `engine` and `engine_macros`, not one.
+    let package = |name: &str, deps: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{deps}")
+    };
+    let cli = package(
+        "cli",
+        "[dependencies]\nengine = { path = \"../engine\" }\nengine_macros = { path = \"../engine/macros\" }\n",
+    );
+    let (engine, macros) = (package("engine", ""), package("engine_macros", ""));
+    let crates = scratch_workspace(
+        "fan_out_crates",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"cli\", \"engine\", \"engine/macros\"]\nresolver = \"3\"\n",
+            ),
+            ("cli/Cargo.toml", &cli),
+            (
+                "cli/src/lib.rs",
+                "//! Cli.\npub fn all() -> u32 { engine::ONE + engine_macros::ONE }\n",
+            ),
+            ("engine/Cargo.toml", &engine),
+            (
+                "engine/src/lib.rs",
+                "//! Engine.\npub const ONE: u32 = 1;\n",
+            ),
+            ("engine/macros/Cargo.toml", &macros),
+            (
+                "engine/macros/src/lib.rs",
+                "//! Macros.\npub const ONE: u32 = 1;\n",
+            ),
+            (
+                "deslop-please.toml",
+                "[high-fan-out]\nfold-siblings = true\nmost-modules = 1\n",
+            ),
+        ],
+    );
+    assert_eq!(fanned(keys(&crates)), ["high-fan-out cli"]);
+}
+
+#[test]
+fn a_deserialized_record_is_no_shared_bag_when_configured() {
+    // The derive need not resolve: what a type derives is read from its text.
+    let lib = "//! Records.\n\
+pub mod data {
+    #[derive(Debug, serde::Deserialize)]
+    pub struct Config { pub items: Vec<u32>, pub size: u32 }
+    #[derive(Debug, serde::Serialize)]
+    pub struct Report { pub items: Vec<u32>, pub size: u32 }
+}
+pub mod x {
+    pub fn grow(config: &mut crate::data::Config, report: &mut crate::data::Report) { config.items.push(1); report.items.push(1); }
+}
+pub mod y {
+    pub fn resize(config: &mut crate::data::Config, report: &mut crate::data::Report) { config.size = 2; report.size = 2; }
+}
+";
+    let workspace = scratch_workspace(
+        "deserialized_records",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"records\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+        ],
+    );
+    let bags = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("shared-mutable-bag "))
+            .collect()
+    };
+    assert_eq!(
+        bags(keys(&workspace)),
+        [
+            "shared-mutable-bag records::data::Config",
+            "shared-mutable-bag records::data::Report",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[shared-mutable-bag]\ndeserialized-records = true\n",
+    )
+    .unwrap();
+    assert_eq!(
+        bags(keys(&workspace)),
+        ["shared-mutable-bag records::data::Report"]
+    );
+}
+
+#[test]
+fn a_private_function_called_once_may_be_wide_and_a_run_of_one_type_is_a_trap_when_configured() {
+    let eight = "a: u8, b: u16, c: u32, d: u64, e: i8, f: i16, g: i32, h: i64";
+    let sum = "u64::from(a) + u64::from(b) + u64::from(c) + d + e as u64 + f as u64 + g as u64 + h as u64";
+    let call = "1, 2, 3, 4, 5, 6, 7, 8";
+    let lib = format!(
+        "//! Wide.\n\
+         fn once({eight}) -> u64 {{ {sum} }}\n\
+         fn twice({eight}) -> u64 {{ {sum} }}\n\
+         fn deep(n: u32, {eight}) -> u64 {{ if n == 0 {{ {sum} }} else {{ deep(n - 1, a, b, c, d, e, f, g, h) }} }}\n\
+         pub fn public({eight}) -> u64 {{ {sum} }}\n\
+         pub fn run() -> u64 {{ once({call}) + twice({call}) + twice({call}) + deep(2, {call}) }}\n\
+         pub fn slots(a: Vec<u32>, b: Vec<u32>, c: Vec<u32>, d: Vec<u64>) -> usize {{ a.len() + b.len() + c.len() + d.len() }}\n\
+         pub fn pairs(a: Vec<u32>, b: Vec<u32>, c: Vec<u64>) -> usize {{ a.len() + b.len() + c.len() }}\n"
+    );
+    let workspace = scratch_workspace(
+        "single_call_site",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"wide\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+        ],
+    );
+    let sized = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("wide-signature ") || key.starts_with("positional-trap "))
+            .collect()
+    };
+    let all = [
+        "wide-signature wide::deep",
+        "wide-signature wide::once",
+        "wide-signature wide::public",
+        "wide-signature wide::twice",
+    ];
+    assert_eq!(sized(keys(&workspace)), all);
+    // Its call of itself is no call site.
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[wide-signature]\nsingle-call-site = true\n[positional-trap]\nsame-type-run = 3\n",
+    )
+    .unwrap();
+    assert_eq!(
+        sized(keys(&workspace)),
+        [
+            "positional-trap wide::slots",
+            "wide-signature wide::public",
+            "wide-signature wide::twice",
+        ]
+    );
+    // A kernel that sets no limit of its own keeps the global one.
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[kernel]\npaths = [\"src/lib\"]\n[wide-signature]\nmost-params = 9\n",
+    )
+    .unwrap();
+    assert_eq!(sized(keys(&workspace)), Vec::<String>::new());
+}
+
+#[test]
+fn the_most_fields_variants_and_functions_of_a_type_are_configured() {
+    let fields: String = (0..17).map(|at| format!("pub f{at}: u32, ")).collect();
+    let variants: String = (0..27).map(|at| format!("V{at}, ")).collect();
+    let methods: String = (0..17)
+        .map(|at| format!("    pub fn m{at}(&self) -> u32 {{ self.f{at} + {at} }}\n"))
+        .collect();
+    let calls: String = (0..17).map(|at| format!(" + t.m{at}()")).collect();
+    let lib = format!(
+        "//! Wide.\npub mod t {{\n    pub struct T {{ {fields}}}\n    pub enum E {{ {variants}}}\n    \
+         impl T {{\n{methods}    }}\n}}\n\
+         pub mod u {{ pub fn sum(t: &crate::t::T) -> u32 {{ 0{calls} }} }}\n"
+    );
+    let workspace = scratch_workspace(
+        "type_limits",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"wide\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+            ),
+            ("src/lib.rs", &lib),
+        ],
+    );
+    let wide = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("wide-"))
+            .collect()
+    };
+    assert_eq!(
+        wide(keys(&workspace)),
+        [
+            "wide-enum wide::t::E",
+            "wide-struct wide::t::T",
+            "wide-type wide::t::T",
+        ]
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "[wide-struct]\nmost-fields = 17\n[wide-enum]\nmost-variants = 27\n\
+         [wide-type]\nmost-functions = 17\n",
+    )
+    .unwrap();
+    assert_eq!(wide(keys(&workspace)), Vec::<String>::new());
+}
+
+#[test]
+fn indirections_that_add_nothing_are_reported_only_when_opted_in() {
+    let lib = "//! Shims.\n\
+pub mod queue {
+    pub struct Queue { items: Vec<u32>, head: usize, limit: usize, lock: std::sync::Mutex<usize> }
+    impl Queue {
+        pub fn new() -> Queue {
+            Queue { items: Vec::new(), head: 0, limit: 4, lock: std::sync::Mutex::new(0) }
+        }
+        pub fn head(&self) -> usize { self.head }
+        pub fn entries(&self) -> &Vec<u32> { &self.items }
+        pub fn limit_or(&self, other: usize) -> usize { self.limit.max(other) }
+        pub fn backlog(&self) -> usize { self.items.len() - self.head }
+        pub fn locked(&self) -> usize { *self.lock.lock().unwrap() }
+    }
+}
+pub mod plan {
+    pub struct Args { pub depth: u32, pub width: u32 }
+    pub struct Shared { pub depth: u32 }
+    fn walk(args: Args) -> u32 { args.depth * args.width }
+    pub fn run(depth: u32) -> u32 { walk(Args { depth, width: 2 }) + twice() }
+    fn read(shared: &Shared) -> u32 { shared.depth }
+    pub fn twice() -> u32 { read(&Shared { depth: 1 }) + read(&Shared { depth: 2 }) }
+    fn solve_inner(n: u32) -> u32 { n * 3 + 1 }
+    pub fn solve(n: u32) -> u32 { solve_inner(n) }
+    fn count_from(n: u32, at: u32) -> u32 { if n == 0 { at } else { count_from(n - 1, at + 1) } }
+    pub fn count(n: u32) -> u32 { count_from(n, 0) }
+    fn shape(n: u32) -> u32 { n + 2 }
+    pub fn shaped(n: u32) -> u32 { shape(n) + super::queue::Queue::new().backlog() as u32 }
+    fn parse(text: &str) -> u32 { text.len() as u32 * 3 }
+    pub fn load(path: &str) -> u32 { let text = std::fs::read_to_string(path).unwrap_or_default(); parse(&text) }
+    fn load_at(path: &std::path::Path) -> u32 { path.as_os_str().len() as u32 * 7 }
+    pub fn load_any(path: impl AsRef<std::path::Path>) -> u32 { load_at(path.as_ref()) }
+    pub struct Run { n: i32 }
+    impl Run {
+        pub fn run(&mut self) { self.run_inner(); }
+        fn run_inner(&mut self) { self.n = self.n * 2 + 1; }
+        pub fn step(&self, x: i32) -> i32 { self.step_at(x, -1) }
+        fn step_at(&self, x: i32, by: i32) -> i32 { x * by + self.n }
+        pub fn last(&self) -> i32 { self.at(self.n - 1) }
+        fn at(&self, i: i32) -> i32 { i * 3 + self.n }
+    }
+    pub struct Depth(u32);
+    impl Depth { fn get(&self) -> u32 { self.0 * 2 + 1 } }
+    pub struct Probe { depth: Depth }
+    impl Probe { pub fn depth(&self) -> u32 { self.depth.get() } }
+    #[derive(serde::Deserialize)]
+    pub struct Plan { pub depth: u32 }
+    fn check_plan(plan: &Plan) -> u32 { plan.depth * 5 }
+    pub fn plan() -> u32 { let plan = Plan { depth: 3 }; check_plan(&plan) }
+    #[derive(Clone, Copy)]
+    pub struct Zeroed { pub depth: u32 }
+    fn deep(zeroed: Zeroed) -> u32 { zeroed.depth * 2 }
+    pub fn zeroed() -> u32 { let z: Zeroed = unsafe { std::mem::zeroed() }; deep(z) }
+}
+mod hidden { pub struct Facade; pub struct Twice; }
+pub mod open { pub struct Open; }
+pub use hidden::{Facade, Twice};
+pub use open::Open;
+pub mod api { pub use crate::hidden::Twice; pub use crate::open::Open; }
+pub mod spec { mod load { pub struct Template; } pub use load::Template; }
+pub use spec::Template;
+pub mod kinds { pub enum Kind { Fast, Slow } }
+pub use kinds::Kind::{Fast, Slow};
+pub use dep::Remote;
+pub mod gpu { pub use dep::Remote; }
+";
+    let workspace = scratch_workspace(
+        "opt_in_indirections",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"shims\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\ndep = { path = \"dep\" }\n[workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+            (
+                "dep/Cargo.toml",
+                "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            ("dep/src/lib.rs", "//! Dep.\npub struct Remote;\n"),
+        ],
+    );
+    let opted = |keys: Vec<String>| -> Vec<String> {
+        let lints = [
+            "rename-getter",
+            "one-use-args",
+            "inner-split",
+            "redundant-reexport",
+        ];
+        keys.into_iter()
+            .filter(|key| {
+                lints
+                    .iter()
+                    .any(|lint| key.starts_with(&format!("{lint} ")))
+            })
+            .collect()
+    };
+    assert_eq!(opted(keys(&workspace)), Vec::<String>::new());
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "opt-in = [\"rename-getter\", \"one-use-args\", \"inner-split\", \"redundant-reexport\"]\n",
+    )
+    .unwrap();
+    // A getter with an argument or one that computes or locks, a struct
+    // built twice, not by a literal or deserialized, a recursive inner function and a
+    // caller that calls more, computes its argument, reads a file, is generic or is another type's
+    // method, `Probe::depth` calling its field's, stay quiet, as do a
+    // private module's re-export and the shallowest second path, unless it
+    // goes through the deeper one: `Template`'s, from `spec`. A path through
+    // `Kind` re-exports no `Kind`; another crate's item has one path here.
+    assert_eq!(
+        opted(keys(&workspace)),
+        [
+            "inner-split shims::plan::Run::run_inner",
+            "inner-split shims::plan::Run::step_at",
+            "inner-split shims::plan::solve_inner",
+            "one-use-args shims::plan::Args",
+            "redundant-reexport shims::Open",
+            "redundant-reexport shims::Template",
+            "redundant-reexport shims::api::Open",
+            "redundant-reexport shims::api::Twice",
+            "redundant-reexport shims::gpu::Remote",
+            "rename-getter shims::queue::Queue::entries",
+            "rename-getter shims::queue::Queue::head",
+        ]
+    );
+}

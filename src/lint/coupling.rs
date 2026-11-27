@@ -15,8 +15,8 @@ use super::{
     item_location, listed, module_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
-use crate::model::{ItemId, ItemKind, Model, NodeId, Tree};
-use crate::settings::Granularity;
+use crate::model::{ItemId, ItemKind, Model, NodeId, NodeKind, Tree};
+use crate::settings::{Granularity, HighFanOut};
 
 /// The most distinct sibling/foreign workspace modules one module may depend on.
 const MOST_FAN_OUT: usize = 15;
@@ -41,7 +41,9 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
     let policy = &model.settings.high_fan_out;
     let mut deps: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
     let mut fan_in: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
-    for reference in model.references.iter().filter(|r| !r.test) {
+    // A member of what a member access gives counts for none: the code
+    // passes through its type's module, which it names nothing of.
+    for reference in model.references.iter().filter(|r| !r.test && !r.chained) {
         let item = &model.items[reference.item.index()];
         if item.kind == ItemKind::Module
             || model.in_tests(item)
@@ -61,12 +63,9 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         {
             continue;
         }
-        deps.entry(from).or_default().insert(counted_as(
-            tree,
-            policy.other_crates,
-            from,
-            target_mod,
-        ));
+        deps.entry(from)
+            .or_default()
+            .insert(counted_as(tree, policy, from, target_mod));
         if !below {
             fan_in.entry(target_mod).or_default().insert(from);
         }
@@ -91,15 +90,30 @@ fn check_fan_out(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
 }
 
 /// What a use of `target` from `from` counts as: the module, or for one of
-/// another crate the top module that holds it, when `[high-fan-out]` says.
-fn counted_as(tree: &Tree, other_crates: Granularity, from: NodeId, target: NodeId) -> NodeId {
+/// another crate the top module that holds it, when `[high-fan-out]` says,
+/// or with `fold-siblings` its parent when that holds neither `from` nor
+/// only the crate.
+fn counted_as(tree: &Tree, policy: &HighFanOut, from: NodeId, target: NodeId) -> NodeId {
     let package = tree.package_of(target);
-    if other_crates == Granularity::Module || package == tree.package_of(from) {
-        return target;
+    if package != tree.package_of(from) && policy.other_crates == Granularity::TopModule {
+        return tree
+            .ancestors(target)
+            .find(|&module| tree.parent(module) == package)
+            .unwrap_or(target);
     }
-    tree.ancestors(target)
-        .find(|&module| tree.parent(module) == package)
-        .unwrap_or(target)
+    // A crate's root is no sibling, nor is a crate the parent of one.
+    let module = |node: NodeId| tree.node(node).kind == NodeKind::Module;
+    match tree.parent(target) {
+        Some(parent)
+            if policy.fold_siblings
+                && module(target)
+                && module(parent)
+                && !tree.is_within(from, parent) =>
+        {
+            parent
+        }
+        _ => target,
+    }
 }
 
 fn names(tree: &Tree, modules: &BTreeSet<NodeId>) -> Vec<String> {
@@ -121,10 +135,11 @@ fn fan_out(
     // With god hubs folded in, a hub, which many modules depend on, keeps
     // the default limit: a layer's looser one is for the modules at its edge.
     // Without, `god-hub` reports a hub on its own.
-    let hub = model.settings.high_fan_out.fold_god_hub
-        && callers.is_some_and(|callers| callers.len() >= MIN_HUB_DEGREE);
-    let layered = layer_limit.filter(|&most| most <= MOST_FAN_OUT || !hub);
-    let most = layered.unwrap_or(MOST_FAN_OUT);
+    let policy = &model.settings.high_fan_out;
+    let hub = policy.fold_god_hub && callers.is_some_and(|callers| callers.len() >= MIN_HUB_DEGREE);
+    let default = policy.most_modules.unwrap_or(MOST_FAN_OUT);
+    let layered = layer_limit.filter(|&most| most <= default || !hub);
+    let most = layered.unwrap_or(default);
     if targets.len() <= most {
         return None;
     }

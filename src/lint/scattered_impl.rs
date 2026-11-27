@@ -252,6 +252,7 @@ mod tests {
                 owner: m,
                 test: false,
                 self_package: Some(pkg),
+                block: None,
             }],
         );
         sample.model.trait_impls.insert(
@@ -260,6 +261,7 @@ mod tests {
                 owner: m,
                 test: false,
                 self_package: None,
+                block: None,
             }],
         );
         sample.model.trait_impls.insert(
@@ -269,11 +271,13 @@ mod tests {
                     owner: m,
                     test: false,
                     self_package: Some(pkg),
+                    block: None,
                 },
                 crate::model::TraitImpl {
                     owner: m,
                     test: true,
                     self_package: Some(pkg),
+                    block: None,
                 },
             ],
         );

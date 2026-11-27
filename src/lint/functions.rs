@@ -1,6 +1,8 @@
 //! `long-function` and `wide-signature`: ratchetable complexity ceilings on
 //! individual functions that cannot be bypassed by inline `#[allow(...)]`.
 
+use std::collections::{HashMap, HashSet};
+
 use super::{
     Diagnostic, HELD_IN_MIND, HygieneLint, Lint, Location, Picture, SizeLint, in_scope,
     item_location, without_generics,
@@ -9,7 +11,7 @@ use crate::graph::Graph;
 use crate::model::{
     FunctionMetrics, Item, ItemId, ItemKind, Model, NodeId, PositionalTrap, Visibility,
 };
-use crate::settings::{Kernel, Traps, lists};
+use crate::settings::{Settings, Traps, lists};
 
 /// The most lines of code, from `fn` to its closing brace, that one non-test
 /// function may hold before it wants splitting.
@@ -27,24 +29,35 @@ struct Limits {
     lines: usize,
     params: usize,
     traps: Traps,
+    /// The shortest run of parameters of one type, any type, that is a trap.
+    same_type_run: Option<usize>,
     /// Why they are not the defaults.
     note: Option<&'static str>,
 }
 
 impl Limits {
-    fn of(kernel: &Kernel, path: Option<&str>) -> Limits {
+    fn of(settings: &Settings, path: Option<&str>) -> Limits {
+        let kernel = &settings.kernel;
         if path.is_some_and(|path| kernel.holds(path)) {
             Limits {
                 lines: kernel.most_lines.unwrap_or(MOST_LINES),
-                params: kernel.most_params.unwrap_or(MOST_PARAMS),
+                params: kernel
+                    .most_params
+                    .or(settings.wide_signature.most_params)
+                    .unwrap_or(MOST_PARAMS),
                 traps: kernel.positional_trap,
+                same_type_run: settings
+                    .positional_trap
+                    .same_type_run
+                    .filter(|_| kernel.positional_trap == Traps::All),
                 note: Some("held to the kernel's limits, which deslop-please.toml sets"),
             }
         } else {
             Limits {
                 lines: MOST_LINES,
-                params: MOST_PARAMS,
+                params: settings.wide_signature.most_params.unwrap_or(MOST_PARAMS),
                 traps: Traps::All,
+                same_type_run: settings.positional_trap.same_type_run,
                 note: None,
             }
         }
@@ -59,6 +72,7 @@ impl Limits {
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
     let tree = &model.tree;
+    let called_once = called_once(model);
     let mut diagnostics = Vec::new();
     for (index, item) in model.items.iter().enumerate() {
         if item.kind != ItemKind::Function {
@@ -81,7 +95,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             key: format!("{}::{name}", tree.display(home)),
             location: item_location(model, id),
             limits: Limits::of(
-                &model.settings.kernel,
+                &model.settings,
                 item.file
                     .map(|file| model.files[file.index()].path.as_str()),
             ),
@@ -91,13 +105,38 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         if item.trait_impl || item.extern_abi {
             continue;
         }
-        diagnostics.extend(wide(&found, &metrics));
+        // A struct of its parameters would be built once, for one call.
+        let spared = model.settings.wide_signature.single_call_site
+            && item.visibility == Visibility::Private
+            && called_once.contains(&id);
+        if !spared {
+            diagnostics.extend(wide(&found, &metrics));
+        }
         diagnostics.extend(trap(&found, &metrics));
         if metrics.returns_string_error && at_boundary(model, item) {
             diagnostics.push(string_error(&found));
         }
     }
     diagnostics
+}
+
+/// The functions that one place calls or names, apart from their own
+/// bodies: a recursive call is no call site.
+fn called_once(model: &Model) -> HashSet<ItemId> {
+    let mut sites: HashMap<ItemId, usize> = HashMap::new();
+    for reference in &model.references {
+        if reference.holder != Some(reference.item) {
+            *sites.entry(reference.item).or_default() += 1;
+        }
+    }
+    for mention in &model.mentions {
+        *sites.entry(mention.item).or_default() += 1;
+    }
+    sites
+        .into_iter()
+        .filter(|&(_, count)| count == 1)
+        .map(|(item, _)| item)
+        .collect()
 }
 
 /// A function that may be reported: how it is reported, and its limits.
@@ -172,24 +211,37 @@ fn wide(found: &Found, metrics: &FunctionMetrics) -> Option<Diagnostic> {
 
 fn trap(found: &Found, metrics: &FunctionMetrics) -> Option<Diagnostic> {
     let name = &found.name;
-    let (message, note, label, length, most) = match metrics.positional_trap? {
-        PositionalTrap::Booleans(count) => (
+    let (message, note, label, length, most) = match metrics.positional_trap {
+        Some(PositionalTrap::Booleans(count)) => (
             format!("`{name}` takes {count} `bool` parameters (positional flag trap)"),
             "replace boolean flags with named enums or an options struct".to_owned(),
             "bools",
             count as usize,
             1usize,
         ),
-        PositionalTrap::RepeatedPrimitive { .. } if found.limits.traps == Traps::Bools => {
-            return None;
+        Some(PositionalTrap::RepeatedPrimitive { count, kind })
+            if found.limits.traps == Traps::All =>
+        {
+            (
+                format!("`{name}` takes {count} consecutive `{kind}` parameters"),
+                format!("group adjacent `{kind}` parameters into a named struct or newtypes"),
+                kind,
+                count as usize,
+                3usize,
+            )
         }
-        PositionalTrap::RepeatedPrimitive { count, kind } => (
-            format!("`{name}` takes {count} consecutive `{kind}` parameters"),
-            format!("group adjacent `{kind}` parameters into a named struct or newtypes"),
-            kind,
-            count as usize,
-            3usize,
-        ),
+        _ => {
+            let run = usize::from(metrics.same_type_run);
+            let shortest = found.limits.same_type_run;
+            let most = shortest.filter(|&most| run >= most)?;
+            (
+                format!("`{name}` takes {run} adjacent parameters of one type"),
+                "group adjacent parameters of one type into a named struct or newtypes".to_owned(),
+                "same type",
+                run,
+                most - 1,
+            )
+        }
     };
     Some(Diagnostic {
         lint: Lint::Size(SizeLint::PositionalTrap),

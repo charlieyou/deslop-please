@@ -61,16 +61,27 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         }
     }
 
+    let most = model
+        .settings
+        .wide_type
+        .most_functions
+        .unwrap_or(MOST_SHOWN);
     let mut diagnostics = Vec::new();
     for (thing, (functions, caller_modules)) in shown {
-        if functions.len() <= MOST_SHOWN {
+        if functions.len() <= most {
             continue;
         }
         let home = graph.things[thing.index()].home;
         if !in_scope(&model.tree, scope, home) {
             continue;
         }
-        diagnostics.push(diagnostic(model, graph, thing, &functions, &caller_modules));
+        diagnostics.push(diagnostic(
+            model,
+            graph,
+            thing,
+            (&functions, &caller_modules),
+            most,
+        ));
     }
     diagnostics
 }
@@ -79,8 +90,8 @@ fn diagnostic(
     model: &Model,
     graph: &Graph,
     thing: ThingId,
-    functions: &BTreeSet<ItemId>,
-    caller_modules: &BTreeSet<NodeId>,
+    (functions, caller_modules): (&BTreeSet<ItemId>, &BTreeSet<NodeId>),
+    most: usize,
 ) -> Diagnostic {
     let type_item = graph.things[thing.index()].item;
     let key = full_name(model, graph, thing);
@@ -111,7 +122,7 @@ fn diagnostic(
         lint: Lint::Size(super::SizeLint::WideType),
         key,
         message: format!(
-            "`{type_name}` is wide: it shows {} to outsiders, more than {MOST_SHOWN}",
+            "`{type_name}` is wide: it shows {} to outsiders, more than {most}",
             counted(functions.len(), "function")
         ),
         location: item_location(model, type_item),
@@ -119,7 +130,7 @@ fn diagnostic(
         picture: Picture::Bar {
             label: "shows".to_owned(),
             length: functions.len(),
-            most: MOST_SHOWN,
+            most,
         },
     }
 }

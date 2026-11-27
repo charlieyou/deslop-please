@@ -160,12 +160,14 @@ impl<'a> Builder<'a> {
         let crate_deps = self.collect_crate_deps();
         let mut mentions = self.text_mentions();
         mentions.extend(self.macro_mentions());
+        mentions.extend(self.macro_word_mentions());
         mentions.extend(consumed.iter().filter_map(|(symbol, test)| {
             match self.symbols.get(symbol.as_str()) {
                 Some(&Named::Item(item)) => Some(Mention {
                     item,
                     test: *test,
                     from: None,
+                    pins: None,
                 }),
                 _ => None,
             }
@@ -272,6 +274,7 @@ impl<'a> Builder<'a> {
                         item,
                         test,
                         from: Some((unit.file, from)),
+                        pins: None,
                     });
                 }
             }
@@ -337,10 +340,223 @@ impl<'a> Builder<'a> {
                     item,
                     test,
                     from: Some((unit.file, from)),
+                    pins: None,
                 }));
             }
         }
         mentions
+    }
+
+    /// What `macro_rules!` bodies name that is no member: a function,
+    /// type, constant or module that the body's file imports or its module
+    /// holds, or an invoking file imports or module holds, by a name the
+    /// body writes; what a path the body writes ends with; and for a path
+    /// from the crate's root of one name, `$crate::helper`, any top-level
+    /// item of that name in the crate. Each is used where the macro is
+    /// invoked, and where its body is. What an associated type of a trait
+    /// `impl` the body writes names, the visibility of what the body
+    /// declares pins, or `pub` with none, the type being a metavariable's: a
+    /// `pub enum $name` with `impl FromStr for $name { type Err = E; }` pins
+    /// `E` at `pub` (E0446). A use credited wrongly hides a report; one
+    /// missed asks for a narrowing that breaks the build.
+    fn macro_word_mentions(&self) -> Vec<Mention> {
+        let mut by_name: HashMap<&str, Vec<ItemId>> = HashMap::new();
+        for (index, item) in self.items.iter().enumerate() {
+            if matches!(
+                item.kind,
+                ItemKind::Function | ItemKind::Type | ItemKind::Constant | ItemKind::Module
+            ) {
+                let last = item.name.rsplit("::").next().unwrap_or(&item.name);
+                by_name.entry(last).or_default().push(ItemId::new(index));
+            }
+        }
+        let sites = self.macro_sites();
+        // By file, what its `use` declarations name, and the modules its
+        // globs name.
+        let mut imported: HashMap<FileId, (Vec<ItemId>, Vec<NodeId>)> = HashMap::new();
+        for unit in &self.units {
+            if unit.macros.bodies.is_empty() && unit.macros.invoked.is_empty() {
+                continue;
+            }
+            let (mut items, mut globs) = (Vec::new(), Vec::new());
+            for (_, item, glob) in self.imported(unit) {
+                match self.items[item.index()].module {
+                    Some(module) if glob => globs.push(module),
+                    _ => items.push(item),
+                }
+            }
+            imported.insert(unit.file, (items, globs));
+        }
+        // A free name where `file` and `module` see it.
+        let named = |word: &str, file: FileId, module: NodeId| -> Vec<ItemId> {
+            let last = |item: &ItemId| {
+                let name = &self.items[item.index()].name;
+                name.rsplit("::").next() == Some(word)
+            };
+            let (items, globs) = imported
+                .get(&file)
+                .map_or((&[][..], &[][..]), |(items, globs)| {
+                    (items.as_slice(), globs.as_slice())
+                });
+            let mut found: Vec<ItemId> = items.iter().copied().filter(last).collect();
+            let held = by_name.get(word).into_iter().flatten();
+            found.extend(held.filter(|item| {
+                let item = &self.items[item.index()];
+                item.parent.is_none() && (item.owner == module || globs.contains(&item.owner))
+            }));
+            found
+        };
+        let mut mentions = Vec::new();
+        for (at, unit) in self.units.iter().enumerate() {
+            let file = &self.files[unit.file.index()];
+            let package = self.tree.package_of(file.module);
+            // Any top-level item of the crate named `word`.
+            let crate_wide = |word: &str| -> Vec<ItemId> {
+                let held = by_name.get(word).into_iter().flatten().copied();
+                held.filter(|item| {
+                    let item = &self.items[item.index()];
+                    item.parent.is_none() && self.tree.package_of(item.owner) == package
+                })
+                .collect()
+            };
+            // A path: what each of its prefixes of two names or more ends,
+            // its own crate's if any is; one name is from the crate's root.
+            let pathed = |path: &[String]| -> Vec<ItemId> {
+                let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+                if let [word] = segments[..] {
+                    return crate_wide(word);
+                }
+                let mut used = Vec::new();
+                for end in 2..=segments.len() {
+                    let segments = &segments[..end];
+                    let ends: Vec<ItemId> = by_name
+                        .get(segments[end - 1])
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|&item| self.ends_with(item, segments))
+                        .collect();
+                    let own: Vec<ItemId> = ends
+                        .iter()
+                        .copied()
+                        .filter(|item| {
+                            self.tree.package_of(self.items[item.index()].owner) == package
+                        })
+                        .collect();
+                    used.extend(if own.is_empty() { ends } else { own });
+                }
+                used
+            };
+            for (index, body) in unit.macros.bodies.iter().enumerate() {
+                let module = unit
+                    .inline_modules
+                    .innermost(body.range)
+                    .unwrap_or(file.module);
+                let mut places = sites.get(&(at, index)).cloned().unwrap_or_default();
+                places.push((unit.file, module));
+                let mut used: Vec<ItemId> =
+                    body.paths.iter().flat_map(|path| pathed(path)).collect();
+                for &(file, from) in &places {
+                    used.extend(body.words.iter().flat_map(|word| named(word, file, from)));
+                }
+                used.sort();
+                used.dedup();
+                let mut pinned: Vec<ItemId> = body
+                    .assoc_types
+                    .iter()
+                    .flat_map(|path| {
+                        let mut found = pathed(path);
+                        if let [word] = &path[..] {
+                            found.extend(named(word, unit.file, module));
+                        }
+                        found
+                    })
+                    .collect();
+                pinned.sort();
+                pinned.dedup();
+                let pins = body.declares.unwrap_or(Visibility::Pub);
+                for (file, from) in places {
+                    let test = self.files[file.index()].test || self.tree.is_test(from);
+                    let at = |item: ItemId, pins: Option<Visibility>| Mention {
+                        item,
+                        test,
+                        from: Some((file, from)),
+                        pins,
+                    };
+                    mentions.extend(used.iter().map(|&item| at(item, None)));
+                    mentions.extend(pinned.iter().map(|&item| at(item, Some(pins))));
+                }
+            }
+        }
+        mentions
+    }
+
+    /// By `macro_rules!` body, by its unit's and its own index, the files
+    /// and modules where it may be expanded. An invocation expands the body
+    /// of its name whose module holds it, the deepest, as a macro's text
+    /// scope goes; otherwise any of its name, by a path, a `#[macro_use]` or
+    /// a `#[macro_export]`. One in another body's text is expanded where
+    /// that body is.
+    fn macro_sites(&self) -> HashMap<(usize, usize), Vec<(FileId, NodeId)>> {
+        let mut bodies: HashMap<&str, Vec<(usize, usize, NodeId)>> = HashMap::new();
+        for (at, unit) in self.units.iter().enumerate() {
+            let file_module = self.files[unit.file.index()].module;
+            for (index, body) in unit.macros.bodies.iter().enumerate() {
+                let module = unit
+                    .inline_modules
+                    .innermost(body.range)
+                    .unwrap_or(file_module);
+                bodies
+                    .entry(body.name.as_str())
+                    .or_default()
+                    .push((at, index, module));
+            }
+        }
+        let mut sites: HashMap<(usize, usize), Vec<(FileId, NodeId)>> = HashMap::new();
+        // Each body invoked in another's text, and that other.
+        let mut nested: Vec<((usize, usize), (usize, usize))> = Vec::new();
+        for (unit_at, unit) in self.units.iter().enumerate() {
+            let module = self.files[unit.file.index()].module;
+            for (name, at) in &unit.macros.invoked {
+                let from = unit.inline_modules.innermost(*at).unwrap_or(module);
+                let Some(named) = bodies.get(name.as_str()) else {
+                    continue;
+                };
+                let around = named
+                    .iter()
+                    .filter(|&&(_, _, at)| self.tree.is_within(from, at))
+                    .max_by_key(|&&(_, _, at)| self.tree.node(at).depth);
+                let expanded: Vec<_> = match around {
+                    Some(body) => vec![body],
+                    None => named.iter().collect(),
+                };
+                let outer = unit
+                    .macros
+                    .bodies
+                    .iter()
+                    .position(|body| body.range.holds(*at));
+                for &(body_at, index, _) in expanded {
+                    let site = (unit.file, from);
+                    sites.entry((body_at, index)).or_default().push(site);
+                    if let Some(outer) = outer {
+                        nested.push(((body_at, index), (unit_at, outer)));
+                    }
+                }
+            }
+        }
+        // As deep as macros nest in practice.
+        for _ in 0..4 {
+            for &(inner, outer) in &nested {
+                let more = sites.get(&outer).cloned().unwrap_or_default();
+                let known = sites.entry(inner).or_default();
+                for site in more {
+                    if !known.contains(&site) {
+                        known.push(site);
+                    }
+                }
+            }
+        }
+        sites
     }
 
     /// What the `use` declarations of `unit` name, by the module each is in,
@@ -562,13 +778,17 @@ impl<'a> Builder<'a> {
                     .iter()
                     .filter(|o| !o.definition && pub_use.range.holds(o.range));
                 for occurrence in named {
+                    // `Kind` in `pub use kinds::Kind::{Fast, Slow}` is on
+                    // the path, not re-exported.
                     if let Some(&Named::Item(item)) = self.symbols.get(occurrence.symbol)
                         && self.items[item.index()].module.is_none()
+                        && !pub_use.on_path.contains(&occurrence.range)
                     {
                         reexports.push(Reexport {
                             item,
                             file: unit.file,
                             line: occurrence.range.start.line + 1,
+                            module: from,
                         });
                     }
                 }
@@ -658,6 +878,7 @@ impl<'a> Builder<'a> {
             test: false,
             in_signature: false,
             struct_update: false,
+            chained: false,
         });
         self.sites.push(Site {
             access,
@@ -682,6 +903,7 @@ impl<'a> Builder<'a> {
             let reference = &mut self.references[at];
             reference.in_signature = written.in_signature;
             reference.struct_update = written.struct_update && names_type;
+            reference.chained = written.chained;
         }
     }
 
@@ -1034,6 +1256,7 @@ impl<'a> Builder<'a> {
                     owner,
                     test,
                     self_package,
+                    block: Some((unit.file, block.block)),
                 });
             }
         }
@@ -1094,6 +1317,7 @@ impl<'a> Builder<'a> {
                         owner: item.owner,
                         test,
                         self_package,
+                        block: None,
                     });
                 }
             }
@@ -1126,7 +1350,7 @@ impl<'a> Builder<'a> {
                     if self.tree.package_of(other_file.module) != package {
                         continue;
                     }
-                    let invocations = other.macros.invoked.iter().filter(|&n| n == name);
+                    let invocations = other.macros.invoked.iter().filter(|(n, _)| n == name);
                     let test = other_file.test || self.tree.is_test(other_file.module);
                     by_trait
                         .entry(trait_id)
@@ -1135,6 +1359,7 @@ impl<'a> Builder<'a> {
                             owner: other_file.module,
                             test,
                             self_package: package,
+                            block: None,
                         }));
                 }
             }

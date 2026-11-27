@@ -13,6 +13,14 @@ use crate::Error;
 /// The file's name, at the workspace's root.
 pub const FILE: &str = "deslop-please.toml";
 
+/// The lints that `opt-in` turns on, and that report nothing without it.
+pub const OPT_IN: [&str; 4] = [
+    "rename-getter",
+    "one-use-args",
+    "inner-split",
+    "redundant-reexport",
+];
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Settings {
@@ -42,6 +50,17 @@ pub struct Settings {
     pub long_file: LongFile,
     /// Which structs may hold many fields.
     pub wide_struct: WideStruct,
+    /// How many functions a type may show.
+    pub wide_type: WideType,
+    /// How many variants an enum may have.
+    pub wide_enum: WideEnum,
+    /// How many parameters a function may take, and which are spared.
+    pub wide_signature: WideSignature,
+    /// Which runs of parameters are traps.
+    pub positional_trap: PositionalTraps,
+    /// The lints that report nothing unless named here: `rename-getter`,
+    /// `one-use-args`, `inner-split`, `redundant-reexport`.
+    pub opt_in: Vec<String>,
     /// Which copies of a body are no duplicates.
     pub duplicate_code: DuplicateCode,
     /// How `--update-allow` and `--allow` treat the allowlist.
@@ -69,6 +88,9 @@ pub struct SharedMutableBag {
     /// a variable whose type, as the index has it, borrows nothing. Through
     /// a `&mut` it still does.
     pub owned_locals: bool,
+    /// A type deriving `Deserialize` is a record read from a file, whose
+    /// fields its readers set one by one on purpose.
+    pub deserialized_records: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -92,12 +114,48 @@ pub struct WideStruct {
     /// that holds data for others, which a flat list of fields suits.
     pub passive_records: bool,
     /// The most fields such a record may have before it is reported anyway;
-    /// unset, any number. At 15 or below, the limit for every struct, it
-    /// spares no record.
+    /// unset, any number. At `most-fields` or below, the limit for every
+    /// struct, it spares no record.
     pub most_passive_fields: Option<usize>,
     /// A struct deriving clap's `Parser`, `Args` or `Subcommand` is a
     /// command line's schema, flat as its flags are.
     pub clap_derives: bool,
+    /// The most fields any struct may hold; default 15.
+    pub most_fields: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct WideType {
+    /// The most working functions a type may show outside it; default 15.
+    pub most_functions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct WideEnum {
+    /// The most variants an enum may have; default 25.
+    pub most_variants: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct WideSignature {
+    /// The most parameters a function outside the kernel may take; default 7.
+    pub most_params: Option<usize>,
+    /// A private function called from one place, not counting its calls of
+    /// itself, may take any number: a struct of its parameters would be
+    /// built once, for that one call.
+    pub single_call_site: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct PositionalTraps {
+    /// Outside the kernel, a run of this many adjacent parameters of one
+    /// type, whatever the type, is a trap too: `a: Vec<u32>, b: Vec<u32>,
+    /// c: Vec<u32>`. Unset, only `bool`s and runs of 4 of one primitive are.
+    pub same_type_run: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -135,6 +193,12 @@ pub struct HighFanOut {
     pub most_by_layer: BTreeMap<String, usize>,
     /// How a module of another crate counts.
     pub other_crates: Granularity,
+    /// The most modules one module may use where `most-by-layer` sets no
+    /// limit; default 15.
+    pub most_modules: Option<usize>,
+    /// Modules under one parent count as one: a use of `a::b::x` counts as
+    /// one of `a::b`, unless `a::b` holds the module that uses it.
+    pub fold_siblings: bool,
 }
 
 /// What one use of another crate's module counts as.
@@ -301,6 +365,25 @@ impl Settings {
                 "`test-only-pub.crate-tests` takes `report` or `justify`; `own-package` is for `external-tests`",
             ));
         }
+        if settings
+            .positional_trap
+            .same_type_run
+            .is_some_and(|run| run < 2)
+        {
+            return Err(Error::new(
+                "`positional-trap.same-type-run` takes 2 or more: a run is of adjacent parameters",
+            ));
+        }
+        if let Some(name) = settings
+            .opt_in
+            .iter()
+            .find(|name| !OPT_IN.contains(&name.as_str()))
+        {
+            return Err(Error::new(format!(
+                "`opt-in` names `{name}`, which is none of {}",
+                OPT_IN.join(", ")
+            )));
+        }
         if let Some(name) = settings
             .high_fan_out
             .most_by_layer
@@ -312,6 +395,11 @@ impl Settings {
             )));
         }
         Ok(settings)
+    }
+
+    /// Whether `opt-in` names `lint`.
+    pub fn opts_in(&self, lint: &str) -> bool {
+        self.opt_in.iter().any(|name| name == lint)
     }
 
     /// The layer of the crate named `name`, by package or crate name, if
@@ -425,5 +513,11 @@ layers = [
             error.to_string().contains("unknown field `layer`"),
             "{error}"
         );
+        let error = Settings::parse("[positional-trap]\nsame-type-run = 1\n").unwrap_err();
+        assert!(error.to_string().contains("2 or more"), "{error}");
+        let error = Settings::parse("opt-in = [\"rename-getter\", \"getter\"]\n").unwrap_err();
+        assert!(error.to_string().contains("`getter`"), "{error}");
+        let settings = Settings::parse("opt-in = [\"inner-split\"]\n").unwrap();
+        assert!(settings.opts_in("inner-split") && !settings.opts_in("rename-getter"));
     }
 }

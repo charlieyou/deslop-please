@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 mod allow;
 #[path = "end_to_end/policy.rs"]
 mod policy;
+#[path = "end_to_end/visibility.rs"]
+mod visibility;
 
 const TOOL: &str = "deslop-please";
 const PROGRAM: &str = env!("CARGO_BIN_EXE_deslop-please");
@@ -1330,7 +1332,7 @@ fn main() {
         keys(&workspace),
         [
             "over-public core_t::N",
-            "over-public core_t::Pair::y",
+            "over-public core_t::Pair.fields",
             "over-public core_t::Scratch",
             "over-public core_t::Tree",
             "over-public core_t::helper",
@@ -1656,10 +1658,9 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
     assert_eq!(
         keys(&workspace),
         [
-            "over-public core_t::Pat::cells",
-            "over-public core_t::Rep::cells",
-            "over-public core_t::Row::cells",
-            "over-public core_t::Row::shift",
+            "over-public core_t::Pat.fields",
+            "over-public core_t::Rep.fields",
+            "over-public core_t::Row.fields",
             "over-public core_t::limits",
             "over-public core_t::limits::MAX",
             "over-public core_t::limits::TOP",
@@ -1671,6 +1672,11 @@ pub fn derive(_: TokenStream) -> TokenStream { TokenStream::new() }
             "unused-pub core_t::limits::MIN",
             "unused-pub core_t::width",
         ]
+    );
+    let report = run(&workspace, &[]).stdout;
+    assert!(
+        report.contains("`Row` has 2 fields more visible than their uses need"),
+        "{report}"
     );
 }
 

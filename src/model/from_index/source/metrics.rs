@@ -25,6 +25,9 @@ pub struct PubUse {
     pub restricted: bool,
     /// Non-empty when the declaration contains `*`.
     pub glob_path: Option<String>,
+    /// Where it writes a name that its path goes on past, which it does not
+    /// re-export: `Kind` in `pub use kinds::Kind::{Fast, Slow};`.
+    pub on_path: Vec<Range>,
 }
 
 /// Whether the return type slice (tokens after `->` up to `{`, `where`, or `;`)
@@ -298,11 +301,17 @@ pub fn pub_uses(
         } else {
             None
         };
+        let on_path = body
+            .windows(2)
+            .filter(|pair| &text[pair[1].start..pair[1].end] == "::")
+            .map(|pair| range_of(pair[0].start, pair[0].end))
+            .collect();
         found.push(PubUse {
             range,
             line: range.start.line + 1,
             restricted,
             glob_path,
+            on_path,
         });
     }
     found
@@ -414,6 +423,55 @@ pub fn positional_trap(text: &str, param_tokens: &[Token]) -> Option<PositionalT
         }
     }
     best.map(|(count, kind)| PositionalTrap::RepeatedPrimitive { count, kind })
+}
+
+/// The longest run of adjacent non-`self` parameters whose types are
+/// written alike, lifetimes aside: 5 for five `Vec<u32>` in a row.
+pub fn same_type_run(text: &str, param_tokens: &[Token]) -> u16 {
+    let mut types: Vec<Vec<&str>> = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut push = |param: &[Token]| {
+        let Some(colon) = param.iter().position(|t| &text[t.start..t.end] == ":") else {
+            return;
+        };
+        if param[..colon]
+            .iter()
+            .any(|t| &text[t.start..t.end] == "self")
+        {
+            return;
+        }
+        types.push(
+            param[colon + 1..]
+                .iter()
+                .filter(|t| t.kind != Kind::Lifetime)
+                .map(|t| &text[t.start..t.end])
+                .collect(),
+        );
+    };
+    for (i, token) in param_tokens.iter().enumerate() {
+        match &text[token.start..token.end] {
+            "<" | "(" | "[" | "{" => depth += 1,
+            ">" | ")" | "]" | "}" => depth -= 1,
+            "," if depth == 0 => {
+                push(&param_tokens[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push(&param_tokens[start..]);
+    let mut longest = 0u16;
+    let mut run = 0u16;
+    for (at, ty) in types.iter().enumerate() {
+        run = if at > 0 && types[at - 1] == *ty {
+            run.saturating_add(1)
+        } else {
+            1
+        };
+        longest = longest.max(run);
+    }
+    longest
 }
 
 /// `None` for empty / `self` parameter; `Some(Some(prim))` for a primitive type;
@@ -534,5 +592,18 @@ mod tests {
             })
         );
         assert_eq!(check("a: f32, b: f32, sep: &Ctx, c: f32, d: f32"), None);
+    }
+
+    #[test]
+    fn the_longest_run_of_one_type_is_of_any_type_and_lifetimes_aside() {
+        let run = |params: &str| same_type_run(params, &tokens::read(params));
+        assert_eq!(
+            run("&mut self, a: Vec<u32>, b: Vec<u32>, c: Vec<u32>, d: Vec<u32>, e: Vec<u32>"),
+            5
+        );
+        assert_eq!(run("a: &'a [u8], b: &[u8], c: &'b [u8], d: u8"), 3);
+        assert_eq!(run("a: Vec<u32>, b: Vec<u64>, c: Vec<u32>"), 1);
+        assert_eq!(run("a: (u8, u8), b: u8, c: u8"), 2);
+        assert_eq!(run(""), 0);
     }
 }

@@ -13,7 +13,8 @@ use super::{
     item_location, listed, module_location, without_generics,
 };
 use crate::graph::{Graph, ThingId};
-use crate::model::{ItemId, ItemKind, Model, NodeId, Visibility};
+use crate::model::{FileId, Item, ItemId, ItemKind, Model, NodeId, Visibility};
+use crate::scip::Range;
 use crate::settings::{TestUse, lists};
 use crate::workspace::TargetKind;
 
@@ -123,7 +124,17 @@ fn pins(
             .filter(|at| over.contains(at) && !kept.contains(at))
             .last()
     };
-    let mut kept = HashSet::new();
+    let mut kept: HashSet<ItemId> = model
+        .mentions
+        .iter()
+        .filter(|mention| {
+            over.contains(&mention.item)
+                && mention
+                    .pins
+                    .is_some_and(|pins| pins >= model.items[mention.item.index()].visibility)
+        })
+        .map(|mention| mention.item)
+        .collect();
     loop {
         let newly: Vec<ItemId> = pinners
             .iter()
@@ -178,7 +189,9 @@ fn pins(
 
 /// The visibility that `item` has where it is named: its own, or less, that
 /// of a type it is written for. An enum's variants, and their fields, are as
-/// visible as the enum.
+/// visible as the enum. An associated type of a trait's `impl` block is as
+/// visible as the block, the trait and the type it is for: what it names
+/// must be too (E0446), as `FromStr::Err` must for a `pub` type.
 fn effective_visibility(model: &Model, item: ItemId) -> Visibility {
     let in_variant = |at: ItemId| {
         std::iter::successors(Some(at), |&at| model.items[at.index()].parent)
@@ -187,9 +200,39 @@ fn effective_visibility(model: &Model, item: ItemId) -> Visibility {
     };
     std::iter::successors(Some(item), |&at| model.items[at.index()].parent)
         .filter(|&at| !in_variant(at))
-        .map(|at| model.items[at.index()].visibility)
+        .map(|at| {
+            let item = &model.items[at.index()];
+            if item.trait_impl && item.kind == ItemKind::Type {
+                trait_visibility(model, item)
+            } else {
+                item.visibility
+            }
+        })
         .min()
         .unwrap_or_default()
+}
+
+/// The visibility of the trait whose `impl` block holds `item`, an
+/// associated type: the workspace's trait whose block, as written, holds
+/// its line, or `pub` for a trait outside the workspace and for a block
+/// that a macro writes, whose trait the index does not say.
+fn trait_visibility(model: &Model, item: &Item) -> Visibility {
+    let holds = |block: Option<(FileId, Range)>| {
+        block.is_some_and(|(file, range)| {
+            Some(file) == item.file
+                && (range.start.line + 1..=range.end.line + 1).contains(&item.line)
+        })
+    };
+    let traits: Vec<ItemId> = model
+        .trait_impls
+        .iter()
+        .filter(|(_, impls)| impls.iter().any(|block| holds(block.block)))
+        .map(|(&id, _)| id)
+        .collect();
+    match traits[..] {
+        [id] => model.items[id.index()].visibility,
+        _ => Visibility::Pub,
+    }
 }
 
 fn collect_usage(model: &Model, graph: &Graph) -> UsageTables {
@@ -485,6 +528,8 @@ fn check_items(
         }
     }
 
+    // By struct, its fields that are too visible.
+    let mut fields: BTreeMap<ItemId, Vec<(ItemId, Diagnostic)>> = BTreeMap::new();
     for &(id, pkg) in candidates {
         let item = &model.items[id.index()];
         if matches!(item.kind, ItemKind::Type | ItemKind::Module)
@@ -503,12 +548,82 @@ fn check_items(
         else {
             continue;
         };
-        if let Some(diag) = classify(model, graph, id, pkg, usage, pins, scope) {
-            diagnostics.push(diag);
+        let Some(diag) = classify(model, graph, id, pkg, usage, pins, scope) else {
+            continue;
+        };
+        match item.parent {
+            Some(parent)
+                if item.kind == ItemKind::Field
+                    && diag.lint == Lint::Surface(SurfaceLint::OverPublic) =>
+            {
+                fields.entry(parent).or_default().push((id, diag));
+            }
+            _ => diagnostics.push(diag),
         }
     }
-
+    // Narrowed, these would make `field-leak` report their structs.
+    let over: HashSet<ItemId> = fields.values().flatten().map(|&(id, _)| id).collect();
+    let held = super::leaks::narrowing_leaks(model, graph, &over);
+    for (ty, found) in fields {
+        let found: Vec<Diagnostic> = found
+            .into_iter()
+            .filter(|(id, _)| !held.contains(id))
+            .map(|(_, diag)| diag)
+            .collect();
+        if !found.is_empty() {
+            diagnostics.push(fields_diagnostic(model, graph, ty, found));
+        }
+    }
     diagnostics
+}
+
+/// One report of the fields of `ty` that are too visible, `found` each:
+/// its count is what an allowlist entry's ceiling caps.
+fn fields_diagnostic(
+    model: &Model,
+    graph: &Graph,
+    ty: ItemId,
+    found: Vec<Diagnostic>,
+) -> Diagnostic {
+    let name = without_generics(&model.items[ty.index()].name);
+    // `Type.fields`, which no path is: an entry for `Type` itself, as one
+    // that rustc keeps visible (E0446), allows no report of its fields.
+    let key = format!(
+        "{}::{name}.fields",
+        model.tree.display(home_of(model, graph, ty))
+    );
+    let mut notes: Vec<String> = found
+        .iter()
+        .take(HELD_IN_MIND)
+        .map(|diag| {
+            let at = diag
+                .location
+                .as_ref()
+                .map_or(String::new(), |at| format!("{}: ", clickable(at)));
+            format!("{at}{}", diag.message)
+        })
+        .collect();
+    if found.len() > HELD_IN_MIND {
+        notes.push(format!(
+            "and {}",
+            counted(found.len() - HELD_IN_MIND, "more field")
+        ));
+    }
+    Diagnostic {
+        lint: Lint::Surface(SurfaceLint::OverPublic),
+        message: format!(
+            "`{name}` has {} more visible than their uses need",
+            counted(found.len(), "field")
+        ),
+        location: item_location(model, ty),
+        notes,
+        picture: Picture::Bar {
+            label: "fields".to_owned(),
+            length: found.len(),
+            most: 0,
+        },
+        key,
+    }
 }
 
 fn is_outside_home(
@@ -1155,11 +1270,17 @@ mod tests {
             found.contains(&(Lint::Surface(SurfaceLint::OverPublic), "p::detail".into())),
             "{found:?}"
         );
-        assert!(
-            found.contains(&(
-                Lint::Surface(SurfaceLint::OverPublic),
-                "p::api::Public::local".into()
-            )),
+        // `Public` is used from `app`: the report under its name is of its
+        // fields, counted.
+        let graph = Graph::new(&sample.model);
+        let fields: Vec<(String, Option<usize>)> = check(&sample.model, &graph, None)
+            .into_iter()
+            .filter(|d| d.key.starts_with("p::api::"))
+            .map(|d| (d.key.clone(), d.measure()))
+            .collect();
+        assert_eq!(
+            fields,
+            [("p::api::Public.fields".to_owned(), Some(1))],
             "{found:?}"
         );
     }

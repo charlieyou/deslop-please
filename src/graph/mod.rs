@@ -238,6 +238,7 @@ mod tests {
             copied: Vec::new(),
             to_read: true,
             whole: false,
+            bare: true,
         };
         // `fn items(&self) -> &Vec<u32> { self.inner.items() }`
         let forwarder = sample.member(queue, a, "Queue::items", ItemKind::Function);

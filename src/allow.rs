@@ -18,6 +18,9 @@ pub struct AllowList {
     entries: Vec<Entry>,
     /// The comment lines below the last entry.
     trailer: Vec<String>,
+    /// Each line whose key an entry above it has, which a merge by union
+    /// can leave: it is merged into that entry.
+    duplicates: Vec<Entry>,
 }
 
 /// One line of the allowlist, with the comment lines above it.
@@ -176,13 +179,25 @@ impl AllowList {
         self.entries[index].names(prefix)
     }
 
+    /// The lines whose key an entry above them has, as written, of those
+    /// whose keys name something under `prefix` if given.
+    pub fn duplicates(&self, prefix: Option<&str>) -> Vec<String> {
+        self.duplicates
+            .iter()
+            .filter(|entry| prefix.is_none_or(|prefix| entry.names(prefix)))
+            .map(Entry::to_string)
+            .collect()
+    }
+
     /// Sorts the entries, and merges those with one key, which a merge by
     /// union can leave: the lower ceiling holds.
     fn sort(&mut self) {
         self.entries.sort_by(Entry::order);
+        let duplicates = &mut self.duplicates;
         self.entries.dedup_by(|later, kept| {
             let same = later.order(kept) == Ordering::Equal;
             if same {
+                duplicates.push(later.clone());
                 kept.merge(later);
             }
             same
@@ -227,8 +242,12 @@ impl AllowList {
                 groups.entry(index).or_default().push(at);
             }
         }
+        // A report of many, as of a struct's fields, counts each.
         for (index, members) in groups {
-            let count = members.len();
+            let count = members
+                .iter()
+                .map(|&at| diagnostics[at].measure().unwrap_or(1))
+                .sum();
             let allows = self.entries[index].allows(Some(count));
             for at in members {
                 if allows {
@@ -302,7 +321,11 @@ impl AllowList {
     /// The allowlist with `edit` made, and a line for each change it makes:
     /// `- entry`, `~ entry -> entry`, `+ entry`.
     pub fn edited(&self, edit: &Edit) -> (AllowList, Vec<String>) {
-        let mut changes = Vec::new();
+        let mut changes: Vec<String> = self
+            .duplicates
+            .iter()
+            .map(|entry| format!("- {entry} (listed twice)"))
+            .collect();
         let mut entries = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
             if edit.removed.contains(&index) {
@@ -333,6 +356,7 @@ impl AllowList {
             header: self.header.clone(),
             entries,
             trailer: self.trailer.clone(),
+            duplicates: Vec::new(),
         };
         list.sort();
         (list, changes)
@@ -396,7 +420,12 @@ impl Entry {
             (a, b) => a.or(b),
         };
         self.reason = self.reason.take().or(other.reason.take());
-        self.comments.append(&mut other.comments);
+        // A merge by union writes the comments above a line twice too.
+        for comment in std::mem::take(&mut other.comments) {
+            if !self.comments.contains(&comment) {
+                self.comments.push(comment);
+            }
+        }
     }
 
     /// It with another `key` or a lower `ceiling`, each if given.
@@ -665,6 +694,27 @@ long-function a::g <= 40
 "
         );
         assert!(!allowed(&allow, long("a::f", 260)));
+        // Ceilings and reasons aside, the key is what makes a line twice.
+        assert_eq!(
+            allow.duplicates(None),
+            ["long-function a::f <= 250", "long-function a::g"]
+        );
+        let (edited, changes) = allow.edited(&Edit::default());
+        assert!(edited.duplicates(None).is_empty());
+        assert_eq!(allow.duplicates(Some("b::")), Vec::<String>::new());
+        // The comments above a line are written twice too.
+        let twice = "long-function a::a\n# hot\nlong-function a::h\n# hot\nlong-function a::h\n";
+        assert_eq!(
+            AllowList::parse(twice).unwrap().to_text(),
+            "long-function a::a\n# hot\nlong-function a::h\n"
+        );
+        assert_eq!(
+            changes,
+            [
+                "- long-function a::f <= 250 (listed twice)",
+                "- long-function a::g (listed twice)"
+            ]
+        );
     }
 
     #[test]
@@ -729,6 +779,16 @@ long-function a::g <= 40
         assert_eq!(three.allowed, [None, None, None]);
         assert_eq!(three.exceeded[0], Some((0, 3)));
         assert_eq!(allow.audit(&[over("a::m::x")], false).lowerable, [(0, 1)]);
+        // One report of a struct's three fields counts three.
+        let fields = Diagnostic {
+            picture: crate::lint::Picture::Bar {
+                label: "fields".into(),
+                length: 3,
+                most: 0,
+            },
+            ..over("a::m::S.fields")
+        };
+        assert_eq!(allow.audit(&[fields], false).exceeded[0], Some((0, 3)));
         assert!(AllowList::parse("over-public a::m::*\n").is_err());
         // Another lint's `::*` is a glob re-export's key.
         let glob = Diagnostic {

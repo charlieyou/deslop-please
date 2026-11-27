@@ -49,9 +49,10 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
         .filter(|item| item.kind == ItemKind::Function && item.takes_self && !item.trait_impl)
         .filter_map(|item| item.parent)
         .collect();
+    let most = policy.most_fields.unwrap_or(MOST_FIELDS);
     let mut diagnostics = Vec::new();
     for (thing, struct_fields) in fields {
-        if struct_fields.len() <= MOST_FIELDS {
+        if struct_fields.len() <= most {
             continue;
         }
         let type_item = graph.things[thing.index()].item;
@@ -89,7 +90,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             lint: Lint::Size(super::SizeLint::WideStruct),
             key,
             message: format!(
-                "`{type_name}` is wide: it holds {}, more than {MOST_FIELDS}",
+                "`{type_name}` is wide: it holds {}, more than {most}",
                 counted(struct_fields.len(), "field")
             ),
             location: item_location(model, type_item),
@@ -97,7 +98,7 @@ fn check_structs(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Dia
             picture: Picture::Bar {
                 label: "fields".to_owned(),
                 length: struct_fields.len(),
-                most: MOST_FIELDS,
+                most,
             },
         });
     }
@@ -120,9 +121,14 @@ fn check_enums(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagn
         }
     }
 
+    let most = model
+        .settings
+        .wide_enum
+        .most_variants
+        .unwrap_or(MOST_VARIANTS);
     let mut diagnostics = Vec::new();
     for (thing, enum_variants) in variants {
-        if enum_variants.len() <= MOST_VARIANTS {
+        if enum_variants.len() <= most {
             continue;
         }
         let home = graph.things[thing.index()].home;
@@ -144,7 +150,7 @@ fn check_enums(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagn
             lint: Lint::Size(super::SizeLint::WideEnum),
             key,
             message: format!(
-                "`{type_name}` is wide: it has {}, more than {MOST_VARIANTS}",
+                "`{type_name}` is wide: it has {}, more than {most}",
                 counted(enum_variants.len(), "variant")
             ),
             location: item_location(model, type_item),
@@ -152,7 +158,7 @@ fn check_enums(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagn
             picture: Picture::Bar {
                 label: "variants".to_owned(),
                 length: enum_variants.len(),
-                most: MOST_VARIANTS,
+                most,
             },
         });
     }

@@ -95,7 +95,7 @@ impl Scoped<'_> {
 }
 
 /// What `--prune-allow` would change in `allow`: what `--strict-allow`
-/// fails on. A circle that shrank is no failure.
+/// fails on. A circle that shrank is no failure; a line listed twice is.
 pub fn tighter(allow: &AllowList, audit: &Audit, scoped: &Scoped) -> Tighter {
     let edit = scoped.prune(allow, audit);
     let lowered = edit
@@ -107,13 +107,17 @@ pub fn tighter(allow: &AllowList, audit: &Audit, scoped: &Scoped) -> Tighter {
         .iter()
         .filter(|(index, _)| audit.moved.contains(index))
         .map(|(index, key)| format!("{}: moved to `{key}`", allow.line(*index)));
+    let duplicated = allow
+        .duplicates(scoped.prefix.as_deref())
+        .into_iter()
+        .map(|line| format!("{line}: listed twice"));
     Tighter {
         stale: edit
             .removed
             .iter()
             .map(|&index| allow.line(index))
             .collect(),
-        tightened: lowered.chain(moved).collect(),
+        tightened: lowered.chain(moved).chain(duplicated).collect(),
     }
 }
 
