@@ -6,7 +6,7 @@
 mod from_index;
 mod tree;
 
-pub use from_index::{build, outside_uses};
+pub use from_index::{OutsideUse, build, outside_uses};
 pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::{HashMap, HashSet};

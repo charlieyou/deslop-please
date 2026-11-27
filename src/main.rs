@@ -306,9 +306,8 @@ fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Mo
 }
 
 /// What the consumers that `deslop-please.toml` names use of anything
-/// outside them, each indexed for the host with default features: each
-/// symbol, and whether test code uses it.
-fn consumed(workspace: &Workspace) -> Result<Vec<(String, bool)>, Error> {
+/// outside them, each indexed for the host with default features.
+fn consumed(workspace: &Workspace) -> Result<Vec<model::OutsideUse>, Error> {
     let mut uses = Vec::new();
     for path in &workspace.settings.consumers {
         let directory = workspace.root.join(path);

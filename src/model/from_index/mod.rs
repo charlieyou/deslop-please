@@ -23,11 +23,11 @@ use source::{
 };
 
 /// The model of `workspace` from its `index`, with `consumed`, what its
-/// consumers use of it: each symbol, and whether test code uses it.
+/// consumers use of it.
 pub fn build(
     index: &Index,
     workspace: &Workspace,
-    consumed: &[(String, bool)],
+    consumed: &[OutsideUse],
 ) -> Result<Model, Error> {
     let mut builder = Builder::new(workspace);
     for document in &index.documents {
@@ -39,14 +39,25 @@ pub fn build(
 }
 
 /// What the code of `workspace`, a consumer, uses of what is outside it,
-/// from its `index`: each symbol, and whether test code uses it.
-pub fn outside_uses(index: &Index, workspace: &Workspace) -> Result<Vec<(String, bool)>, Error> {
+/// from its `index`.
+pub fn outside_uses(index: &Index, workspace: &Workspace) -> Result<Vec<OutsideUse>, Error> {
     let mut builder = Builder::new(workspace);
     for document in &index.documents {
         builder.add_document(document)?;
     }
     builder.mark_test_code();
     Ok(builder.outside_uses())
+}
+
+/// A consumer's use of a symbol outside it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OutsideUse {
+    pub symbol: String,
+    /// Test code uses it.
+    pub test: bool,
+    /// It names a type in a struct literal with a base, `T { a, ..base }`,
+    /// which uses every field of the type.
+    pub struct_update: bool,
 }
 
 /// How many of a file's first lines may mark it `@generated`.
@@ -144,7 +155,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The model, once every document is in.
-    fn finish(mut self, index: &Index, consumed: &[(String, bool)]) -> Model {
+    fn finish(mut self, index: &Index, consumed: &[OutsideUse]) -> Model {
         let traits = self.read_symbol_information(index);
         self.mark_owned(index);
         self.mark_signatures();
@@ -161,17 +172,7 @@ impl<'a> Builder<'a> {
         let mut mentions = self.text_mentions();
         mentions.extend(self.macro_mentions());
         mentions.extend(self.macro_word_mentions());
-        mentions.extend(consumed.iter().filter_map(|(symbol, test)| {
-            match self.symbols.get(symbol.as_str()) {
-                Some(&Named::Item(item)) => Some(Mention {
-                    item,
-                    test: *test,
-                    from: None,
-                    pins: None,
-                }),
-                _ => None,
-            }
-        }));
+        mentions.extend(self.consumer_mentions(consumed));
         Model {
             tree: self.tree,
             files: self.files,
@@ -592,9 +593,36 @@ impl<'a> Builder<'a> {
         path.ends_with(segments)
     }
 
-    /// What the code uses of what is outside the workspace: each symbol, and
-    /// whether test code uses it. Test code must be marked.
-    fn outside_uses(&self) -> Vec<(String, bool)> {
+    /// The uses of items that `consumed`, the consumers' uses, show: a
+    /// struct literal with a base uses each field of its type too.
+    fn consumer_mentions(&self, consumed: &[OutsideUse]) -> Vec<Mention> {
+        let mut fields: HashMap<ItemId, Vec<ItemId>> = HashMap::new();
+        for (index, item) in self.items.iter().enumerate() {
+            if let (ItemKind::Field, Some(parent)) = (item.kind, item.parent) {
+                fields.entry(parent).or_default().push(ItemId::new(index));
+            }
+        }
+        let mut mentions = Vec::new();
+        for used in consumed {
+            let Some(&Named::Item(item)) = self.symbols.get(used.symbol.as_str()) else {
+                continue;
+            };
+            let moved = fields.get(&item).filter(|_| used.struct_update);
+            for item in std::iter::once(&item).chain(moved.into_iter().flatten()) {
+                mentions.push(Mention {
+                    item: *item,
+                    test: used.test,
+                    from: None,
+                    pins: None,
+                });
+            }
+        }
+        mentions
+    }
+
+    /// What the code uses of what is outside the workspace. Test code must
+    /// be marked.
+    fn outside_uses(&self) -> Vec<OutsideUse> {
         let mut uses = Vec::new();
         for unit in &self.units {
             let file = &self.files[unit.file.index()];
@@ -612,10 +640,11 @@ impl<'a> Builder<'a> {
                     .inline_modules
                     .innermost(occurrence.range)
                     .unwrap_or(file.module);
-                uses.push((
-                    occurrence.symbol.to_owned(),
-                    file.test || self.tree.is_test(from),
-                ));
+                uses.push(OutsideUse {
+                    symbol: occurrence.symbol.to_owned(),
+                    test: file.test || self.tree.is_test(from),
+                    struct_update: unit.source.written(occurrence.range, None).struct_update,
+                });
             }
         }
         uses.sort();

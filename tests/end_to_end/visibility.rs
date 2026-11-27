@@ -3,7 +3,7 @@
 //! not a field whose narrowing would make `field-leak` report its struct.
 //! A struct's fields are one report, whose ceiling caps how many.
 
-use super::{keys, private_pair, run};
+use super::{keys, private_pair, run, scratch_workspace};
 
 fn over_public(keys: Vec<String>) -> Vec<String> {
     keys.into_iter()
@@ -334,4 +334,72 @@ fn over_public_asks_no_narrowing_that_makes_a_field_leak_and_counts_a_structs_fi
             .iter()
             .any(|key| key.starts_with("field-leak ")),
     );
+}
+
+#[test]
+fn a_struct_literal_with_a_base_uses_every_field_of_its_type_there() {
+    let workspace = scratch_workspace(
+        "struct_update_uses",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"app\", \"core\"]\nexclude = [\"gpu\"]\nresolver = \"3\"\n",
+            ),
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core_t\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+            ),
+            (
+                "core/src/lib.rs",
+                "//! Ops.\npub mod ops {\n    \
+                 #[derive(Default)]\n    pub struct DecisionOp { pub slot: u32, pub width: u32 }\n    \
+                 #[derive(Default)]\n    pub struct ChanceOp { pub deal: u32, pub weight: u32 }\n    \
+                 pub fn run(op: &DecisionOp, chance: &ChanceOp) -> u32 { op.slot + chance.deal }\n}\n",
+            ),
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\
+                 [dependencies]\ncore_t = { path = \"../core\" }\n",
+            ),
+            (
+                "app/src/main.rs",
+                "use core_t::ops::{ChanceOp, DecisionOp, run};\n\
+                 fn main() {\n    let op = DecisionOp { slot: 1, ..Default::default() };\n    \
+                 println!(\"{}\", run(&op, &ChanceOp::default()));\n}\n",
+            ),
+            (
+                "gpu/Cargo.toml",
+                "[package]\nname = \"gpu\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [workspace]\n[dependencies]\ncore_t = { path = \"../core\" }\n",
+            ),
+            (
+                "gpu/src/lib.rs",
+                "use core_t::ops::{ChanceOp, DecisionOp, run};\n\
+                 pub fn plan() -> u32 {\n    \
+                 run(&DecisionOp::default(), &ChanceOp { deal: 1, ..ChanceOp::default() })\n}\n",
+            ),
+        ],
+    );
+    let visibility = |keys: Vec<String>| -> Vec<String> {
+        keys.into_iter()
+            .filter(|key| key.starts_with("over-public ") || key.starts_with("unused-pub "))
+            .collect()
+    };
+    // `app`'s literal moves `width` from its base: it uses both fields of
+    // `DecisionOp` from another crate. Nothing in the workspace builds a
+    // `ChanceOp` from fields.
+    assert_eq!(
+        visibility(keys(&workspace)),
+        [
+            "over-public core_t::ops::ChanceOp.fields",
+            "unused-pub core_t::ops::ChanceOp::weight",
+        ]
+    );
+    // The consumer's literal with a base does, so it uses `weight` too.
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "consumers = [\"gpu\"]\n",
+    )
+    .unwrap();
+    assert_eq!(visibility(keys(&workspace)), Vec::<String>::new());
 }
