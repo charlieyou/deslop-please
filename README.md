@@ -120,7 +120,9 @@ consumers = ["crates/gpu", "../app/crates/app-solver"]
 #   type parameters and whose body is only that call.
 # - `redundant-reexport`: a `pub use` in a public module of an item that
 #   another public path of the crate already reaches: where it is defined,
-#   or the shallowest `pub use` that names it there.
+#   through a module that a `pub use` of the crate's names (`pub use
+#   dep::parts;` reaches `parts::Budget`), or the shallowest `pub use` that
+#   names it there. One `pub use` of another crate's item is a facade.
 opt-in = ["rename-getter", "redundant-reexport"]
 
 # Features that build code only for tests. Set, even empty, it makes an item

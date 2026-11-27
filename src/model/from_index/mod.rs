@@ -810,7 +810,6 @@ impl<'a> Builder<'a> {
                     // `Kind` in `pub use kinds::Kind::{Fast, Slow}` is on
                     // the path, not re-exported.
                     if let Some(&Named::Item(item)) = self.symbols.get(occurrence.symbol)
-                        && self.items[item.index()].module.is_none()
                         && !pub_use.on_path.contains(&occurrence.range)
                     {
                         reexports.push(Reexport {

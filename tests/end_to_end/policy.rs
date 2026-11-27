@@ -1428,3 +1428,77 @@ pub mod report {
         ]
     );
 }
+
+#[test]
+fn a_reexported_module_gives_its_items_a_second_path_in_the_crate() {
+    let lib = "//! App.\n\
+pub use vocab::{flavor, parts, street};
+pub use vocab::parts::Budget;
+pub use vocab::street::Scope;
+pub use vocab::solo::Solo;
+pub mod engine { pub use vocab::flavor::Flavor; }
+mod hidden { pub mod api { pub struct Key; } }
+pub use hidden::api;
+pub use hidden::api::Key;
+mod secret { pub struct Lock; }
+mod shelf { pub mod rack { pub use crate::Lock; } }
+pub use secret::Lock;
+pub use shelf::rack;
+pub use vocab::{left, right};
+#[cfg(any(test, feature = \"test-utils\"))]
+pub use vocab::fixtures;
+pub use vocab::fixtures::Fixture;
+";
+    let vocab = "//! Vocab.\n\
+pub mod parts { pub struct Budget; }
+pub mod street { mod inner { pub struct Scope; } pub use inner::Scope; }
+pub mod flavor { pub enum Flavor { Fast } }
+pub mod solo { pub struct Solo; }
+pub mod left { pub use crate::right; }
+pub mod right { pub use crate::left; }
+pub mod fixtures { pub struct Fixture; }
+";
+    let workspace = scratch_workspace(
+        "reexported_modules",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\nvocab = { path = \"vocab\" }\n[features]\ntest-utils = []\n\
+                 [workspace]\n",
+            ),
+            ("src/lib.rs", lib),
+            (
+                "vocab/Cargo.toml",
+                "[package]\nname = \"vocab\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            ("vocab/src/lib.rs", vocab),
+        ],
+    );
+    std::fs::write(
+        workspace.join("deslop-please.toml"),
+        "opt-in = [\"redundant-reexport\"]\ntest-features = [\"test-utils\"]\n",
+    )
+    .unwrap();
+    let reexports: Vec<String> = keys(&workspace)
+        .into_iter()
+        .filter(|key| key.starts_with("redundant-reexport "))
+        .collect();
+    // `app::parts::Budget`, `app::street::Scope` (through `street`'s own
+    // `pub use`), `app::flavor::Flavor` and `app::api::Key` stay; `Solo`,
+    // re-exported once from its home crate, is a facade. `app::rack::Lock`
+    // goes through `app::Lock`, `app::left` and `app::right` each through
+    // the other, and `app::fixtures` is for tests: none is a path that
+    // stays. In `vocab`, `left::right` is a second path to `right`.
+    assert_eq!(
+        reexports,
+        [
+            "redundant-reexport app::Budget",
+            "redundant-reexport app::Key",
+            "redundant-reexport app::Scope",
+            "redundant-reexport app::engine::Flavor",
+            "redundant-reexport vocab::left::right",
+            "redundant-reexport vocab::right::left",
+        ]
+    );
+}

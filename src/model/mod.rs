@@ -27,7 +27,7 @@ pub struct Model {
     pub wrappers: HashMap<ItemId, Wrapper>,
     /// The uses of items that no reference shows.
     pub mentions: Vec<Mention>,
-    /// Each item a plain `pub use` names, other than a module, where it does.
+    /// Each item a plain `pub use` names, a module too, where it does.
     pub reexports: Vec<Reexport>,
     /// `pub use <path>::*;` and `pub(...) use <path>::*;` glob re-exports.
     pub glob_reexports: Vec<GlobReexport>,
@@ -142,7 +142,7 @@ pub struct Mention {
 }
 
 /// An item that a plain `pub use` declaration names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Reexport {
     pub item: ItemId,
     pub file: FileId,

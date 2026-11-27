@@ -16,8 +16,10 @@
 //!   `run_inner`, one function split in two.
 //! - `redundant-reexport`: a `pub use` of an item that is already public
 //!   on another path of the crate: where it is defined, every module above
-//!   it `pub`, or the shallowest public module's `pub use` that names it
-//!   there, as for another crate's item any is.
+//!   it `pub`; through a module that a `pub use` of the crate's names,
+//!   its own or another crate's; or the shallowest public module's `pub
+//!   use` that names it there, as for another crate's item any is. One
+//!   `pub use` of another crate's item is a facade, which it is not.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -26,7 +28,7 @@ use crate::lint::{
     Diagnostic, EncapsulationLint, Lint, Location, Picture, clickable, in_scope, item_location,
     without_generics,
 };
-use crate::model::{FileId, ItemId, ItemKind, Model, NodeId, Visibility, Wrapper};
+use crate::model::{FileId, ItemId, ItemKind, Model, NodeId, Reexport, Visibility, Wrapper};
 use crate::workspace::TargetKind;
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
@@ -490,13 +492,15 @@ fn redundant_reexports(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> 
             .take_while(|&at| Some(at) != package)
             .all(|at| declared.get(&at) == Some(&Visibility::Pub))
     };
+    let at = |reexport: &Reexport| Location {
+        file: model.files[reexport.file.index()].path.clone(),
+        line: reexport.line,
+    };
     // By item and the crate that re-exports it: another crate's item is on
     // no path of this one's, whose users would need that crate too.
-    let mut by_item: BTreeMap<(ItemId, Option<NodeId>), Vec<&crate::model::Reexport>> =
-        BTreeMap::new();
-    for reexport in &model.reexports {
-        let file = &model.files[reexport.file.index()];
-        if !file.test && !tree.is_test(reexport.module) && public(reexport.module) {
+    let mut by_item: BTreeMap<(ItemId, Option<NodeId>), Vec<&Reexport>> = BTreeMap::new();
+    for reexport in model.reexports.iter().filter(|r| built(model, r)) {
+        if public(reexport.module) {
             let crate_of = tree.package_of(reexport.module);
             by_item
                 .entry((reexport.item, crate_of))
@@ -504,54 +508,83 @@ fn redundant_reexports(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> 
                 .push(reexport);
         }
     }
-    let mut diagnostics = Vec::new();
-    for ((item, crate_of), mut reexports) in by_item {
-        let defined = &model.items[item.index()];
-        let package = tree.package_of(defined.owner);
-        let own = package == crate_of;
-        let at_home = own
-            && defined.visibility == Visibility::Pub
-            && defined.parent.is_none()
-            && public(defined.owner);
-        // Whether code in `from` surely can name the item where it is
-        // defined: each module on the way down is `pub`, or declared in a
-        // module `from` is in, as a private one is visible. Another crate's
-        // item is `pub` where any `pub use` names it.
-        let direct = |from: NodeId| {
-            !own || tree
-                .ancestors(defined.owner)
-                .take_while(|&at| Some(at) != package && !tree.is_within(from, at))
-                .all(|at| {
-                    declared.get(&at) == Some(&Visibility::Pub)
-                        || tree
-                            .parent(at)
-                            .is_some_and(|parent| tree.is_within(from, parent))
-                })
-        };
+    for reexports in by_item.values_mut() {
         reexports.sort_by_key(|r| (tree.node(r.module).depth, r.file, r.line));
         reexports.dedup_by_key(|r| r.module);
-        let name = without_generics(&defined.name);
-        let home_path = format!("{}::{name}", tree.display(defined.owner));
-        // The path that stays: where it is defined, or the shallowest
-        // `pub use` that names it there, which those that cannot go
-        // through (E0364 keeps it `pub`).
-        let (kept, kept_path, redundant): (Option<Location>, String, Vec<_>) = if at_home {
-            (
-                item_location(model, item),
-                home_path.clone(),
-                reexports.iter().collect(),
-            )
-        } else if let Some(first) = reexports.iter().position(|r| direct(r.module)) {
-            let at = Location {
-                file: model.files[reexports[first].file.index()].path.clone(),
-                line: reexports[first].line,
+    }
+    // By item: the path that stays, where it is, and the `pub use`s that
+    // add another.
+    let choose = |through: &Through| {
+        let mut chosen = Vec::new();
+        for (&(item, crate_of), reexports) in &by_item {
+            let defined = &model.items[item.index()];
+            let package = tree.package_of(defined.owner);
+            let own = package == crate_of;
+            let at_home = own
+                && defined.visibility == Visibility::Pub
+                && defined.parent.is_none()
+                && public(defined.owner);
+            // Whether code in `from` surely can name the item where it is
+            // defined: each module on the way down is `pub`, or declared in
+            // a module `from` is in, as a private one is visible. Another
+            // crate's item is `pub` where any `pub use` names it.
+            let direct = |from: NodeId| {
+                !own || tree
+                    .ancestors(defined.owner)
+                    .take_while(|&at| Some(at) != package && !tree.is_within(from, at))
+                    .all(|at| {
+                        declared.get(&at) == Some(&Visibility::Pub)
+                            || tree
+                                .parent(at)
+                                .is_some_and(|parent| tree.is_within(from, parent))
+                    })
             };
-            let path = format!("{}::{name}", tree.display(reexports[first].module));
-            let rest = reexports.iter().enumerate().filter(|&(at, _)| at != first);
-            (Some(at), path, rest.map(|(_, r)| r).collect())
-        } else {
-            continue;
-        };
+            let name = without_generics(&defined.name);
+            let home_path = format!("{}::{name}", tree.display(defined.owner));
+            // A path through a re-exported module, which no one item's `pub
+            // use` takes away, unless it goes through one of the item's own.
+            let through = through
+                .get(&(item, crate_of))
+                .into_iter()
+                .flatten()
+                .find(|(_, by)| !reexports.contains(by));
+            // The path that stays: where it is defined, through a module,
+            // or the shallowest `pub use` that names it there, which those
+            // that cannot go through (E0364 keeps it `pub`).
+            let (kept, kept_path, redundant): (Option<Location>, String, Vec<&Reexport>) =
+                if at_home {
+                    (
+                        item_location(model, item),
+                        home_path.clone(),
+                        reexports.clone(),
+                    )
+                } else if let Some((path, by)) = through {
+                    (Some(at(by)), path.clone(), reexports.clone())
+                } else if let Some(first) = reexports.iter().position(|r| direct(r.module)) {
+                    let path = format!("{}::{name}", tree.display(reexports[first].module));
+                    let mut rest = reexports.clone();
+                    rest.remove(first);
+                    (Some(at(reexports[first])), path, rest)
+                } else {
+                    continue;
+                };
+            chosen.push((name, home_path, kept, kept_path, redundant));
+        }
+        chosen
+    };
+    // A module's `pub use` that is itself redundant gives no path that
+    // stays: one round finds them, and the next goes without them.
+    let first = choose(&through_modules(model, &by_item, &HashSet::new()));
+    let dropped: HashSet<Reexport> = first
+        .iter()
+        .flat_map(|choice| &choice.4)
+        .filter(|r| model.items[r.item.index()].module.is_some())
+        .map(|r| **r)
+        .collect();
+    let mut diagnostics = Vec::new();
+    for (name, home_path, kept, kept_path, redundant) in
+        choose(&through_modules(model, &by_item, &dropped))
+    {
         for reexport in redundant {
             if !in_scope(tree, scope, reexport.module) {
                 continue;
@@ -566,10 +599,7 @@ fn redundant_reexports(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> 
                 lint: Lint::Encapsulation(EncapsulationLint::RedundantReexport),
                 key: key.clone(),
                 message: format!("`pub use` of `{name}` adds a second public path to it"),
-                location: Some(Location {
-                    file: model.files[reexport.file.index()].path.clone(),
-                    line: reexport.line,
-                }),
+                location: Some(at(reexport)),
                 notes,
                 picture: Picture::Arrow {
                     from: key,
@@ -580,4 +610,84 @@ fn redundant_reexports(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> 
         }
     }
     diagnostics
+}
+
+/// Whether a normal build has `reexport`: it is in no test, nor one that
+/// a `cfg` builds only for tests, as [`Model::in_tests`] reads them.
+fn built(model: &Model, reexport: &Reexport) -> bool {
+    let file = &model.files[reexport.file.index()];
+    !file.test
+        && !model.tree.is_test(reexport.module)
+        && !(model.settings.test_features.is_some() && file.tests_only_at(reexport.line))
+}
+
+/// By item and crate, its paths through modules, each with the `pub use`
+/// of the module it goes through.
+type Through<'a> = HashMap<(ItemId, Option<NodeId>), Vec<(String, &'a Reexport)>>;
+
+/// By item and crate, the paths that the crate's `pub use`s of modules,
+/// `by_item`'s but those `dropped`, give it, shortest first, each with the
+/// `pub use` it goes through: `app::parts::Budget` for `pub use
+/// dep::parts;` in `app`. A path goes on through what is `pub` below the
+/// module and another crate's `pub use`s there, but no `pub use` of the
+/// crate's own, which may name what it is redundant with.
+fn through_modules<'a>(
+    model: &Model,
+    by_item: &BTreeMap<(ItemId, Option<NodeId>), Vec<&'a Reexport>>,
+    dropped: &HashSet<Reexport>,
+) -> Through<'a> {
+    let tree = &model.tree;
+    // By module, the `pub` items written in it, and the plain `pub use`s.
+    let mut held: HashMap<NodeId, Vec<ItemId>> = HashMap::new();
+    for (index, item) in model.items.iter().enumerate() {
+        let free = item.parent.is_none() && !item.name.contains("::");
+        if free && item.visibility == Visibility::Pub && !model.in_tests(item) {
+            held.entry(item.owner).or_default().push(ItemId::new(index));
+        }
+    }
+    let mut written: HashMap<NodeId, Vec<&Reexport>> = HashMap::new();
+    for reexport in model.reexports.iter().filter(|r| built(model, r)) {
+        written.entry(reexport.module).or_default().push(reexport);
+    }
+    let mut found: Through = HashMap::new();
+    for (&(module, crate_of), reexports) in by_item {
+        let Some(node) = model.items[module.index()].module else {
+            continue;
+        };
+        // A crate's own ancestor, `pub use crate as root;`, is no module
+        // below it.
+        for &by in reexports
+            .iter()
+            .filter(|by| !dropped.contains(by) && !tree.is_within(by.module, node))
+        {
+            let name = without_generics(&model.items[module.index()].name);
+            let mut stack = vec![(node, format!("{}::{name}", tree.display(by.module)))];
+            let mut seen = HashSet::from([node]);
+            while let Some((at, prefix)) = stack.pop() {
+                let defined = held.get(&at).into_iter().flatten().copied();
+                let named = written
+                    .get(&at)
+                    .into_iter()
+                    .flatten()
+                    .filter(|r| tree.package_of(r.module) != crate_of)
+                    .map(|r| r.item);
+                for item in defined.chain(named) {
+                    let item_name = without_generics(&model.items[item.index()].name);
+                    let path = format!("{prefix}::{item_name}");
+                    if let Some(below) = model.items[item.index()].module
+                        && seen.insert(below)
+                    {
+                        stack.push((below, path.clone()));
+                    }
+                    found.entry((item, crate_of)).or_default().push((path, by));
+                }
+            }
+        }
+    }
+    for paths in found.values_mut() {
+        paths.sort_by(|a, b| {
+            (a.0.matches("::").count(), &a.0).cmp(&(b.0.matches("::").count(), &b.0))
+        });
+    }
+    found
 }
