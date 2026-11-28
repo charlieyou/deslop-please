@@ -311,6 +311,11 @@ pub struct Reference {
     /// whose type the code need not name: `shared` and `config` in
     /// `subgame.inner().shared.config`.
     pub chained: bool,
+    /// Its holder, a function, takes a value of it: a parameter's type
+    /// names it, other than as an element of a slice, array or collection.
+    pub taken: bool,
+    /// The code calls what it names: `run(..)`, but not `map(run)`.
+    pub called: bool,
 }
 
 /// A function that adds nothing of its own.
@@ -501,6 +506,8 @@ pub mod tests {
                 in_signature: false,
                 struct_update: false,
                 chained: false,
+                taken: false,
+                called: false,
             });
         }
 

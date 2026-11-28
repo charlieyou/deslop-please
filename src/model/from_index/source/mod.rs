@@ -158,7 +158,27 @@ pub struct Written {
     /// It names a member of what a member access or a call before it gives:
     /// `shared` and `config` in `subgame.inner().shared.config`.
     pub chained: bool,
+    /// In a function's parameters, as one value: a parameter's type is it,
+    /// or holds it other than as an element of a slice, array or collection:
+    /// `args: &Args` and `Option<Args>`, but neither `rows: &[Row]` nor
+    /// `Vec<Row>`, nor the return type.
+    pub taken: bool,
+    /// It names what the code calls there: `run(..)`, `self.run(..)` and
+    /// `run::<T>(..)`, but not `map(run)`.
+    pub called: bool,
 }
+
+/// Collections whose type arguments are the types of their elements.
+const COLLECTIONS: [&str; 8] = [
+    "Vec",
+    "VecDeque",
+    "LinkedList",
+    "BinaryHeap",
+    "HashSet",
+    "BTreeSet",
+    "HashMap",
+    "BTreeMap",
+];
 
 /// What a function's text says about it.
 pub struct FunctionText {
@@ -579,7 +599,68 @@ impl Source {
                 .is_some_and(|(holder, kind)| self.in_signature(holder, kind, name)),
             struct_update: self.struct_update(name),
             chained: self.chained(name),
+            taken: holder.is_some_and(|(holder, kind)| {
+                kind == ItemKind::Function && self.taken(holder, name)
+            }),
+            called: self.called(name),
         }
+    }
+
+    /// Whether the name at `name`, inside the definition `holder` of a
+    /// function, is in the type of one of its parameters, but not inside
+    /// `[..]` or a collection's `<..>`.
+    fn taken(&self, holder: Range, name: Range) -> bool {
+        let (Some(tokens), Some(offset)) = (self.tokens_in(holder), self.offset(name.start)) else {
+            return false;
+        };
+        let Some(fn_at) = tokens.iter().position(|t| self.is(*t, "fn")) else {
+            return false;
+        };
+        let mut open = fn_at + 2;
+        if tokens.get(open).is_some_and(|t| self.is(*t, "<")) {
+            open = self.past_angles_in(tokens, open);
+        }
+        if !tokens.get(open).is_some_and(|t| self.is(*t, "(")) {
+            return false;
+        }
+        let Some(close) = self.matching_in(tokens, open) else {
+            return false;
+        };
+        let Some(at) = (open + 1..close).find(|&at| tokens[at].start == offset) else {
+            return false;
+        };
+        // The brackets open around the name, each a `[`, a `(`, or the type
+        // a `<` follows.
+        let mut around: Vec<&str> = Vec::new();
+        for index in open + 1..at {
+            match self.text(tokens[index]) {
+                "[" | "(" => around.push(self.text(tokens[index])),
+                "<" => around.push(self.text(tokens[index - 1])),
+                "]" | ")" | ">" => {
+                    around.pop();
+                }
+                _ => {}
+            }
+        }
+        !around
+            .iter()
+            .any(|opener| *opener == "[" || COLLECTIONS.contains(opener))
+    }
+
+    /// Whether the name at `name` is called: `(` follows it, or its
+    /// turbofish.
+    fn called(&self, name: Range) -> bool {
+        let tokens = &self.tokens;
+        let Some(offset) = self.offset(name.start) else {
+            return false;
+        };
+        let mut next = tokens.partition_point(|token| token.start < offset) + 1;
+        if tokens.get(next).is_some_and(|t| self.is(*t, "::"))
+            && tokens.get(next + 1).is_some_and(|t| self.is(*t, "<"))
+        {
+            next = self.past_angles(next + 1).unwrap_or(tokens.len());
+        }
+        tokens.get(next).is_some_and(|t| self.is(*t, "("))
     }
 
     /// Whether the name at `name` follows a `.` after what is no variable:
@@ -1520,5 +1601,61 @@ pub use g::Item;\n";
                 .into(),
         );
         assert_eq!(args.derives(args.whole()), ["Parser"]);
+    }
+
+    #[test]
+    fn a_function_takes_a_type_in_a_parameter_but_not_as_an_element_or_its_return() {
+        // Whether the function takes `Arg`, wherever its first `Arg` is.
+        let taken = |code: &str| {
+            let source = Source::new(code.to_owned());
+            let column = u32::try_from(code.find("Arg").expect("the code names Arg")).unwrap();
+            let name = Range {
+                start: at(0, column),
+                end: at(0, column + 3),
+            };
+            source
+                .written(name, Some((source.whole(), ItemKind::Function)))
+                .taken
+        };
+        for code in [
+            "fn f(arg: Arg) {}",
+            "fn f<T: Copy>(n: T, arg: &mut Arg) {}",
+            "fn f(arg: Option<&Arg>, rows: &[u8]) {}",
+            "fn f(State(arg): State<Arg>) {}",
+            "fn f([a, b]: [u8; 2], arg: Box<Arg>) {}",
+        ] {
+            assert!(taken(code), "{code}");
+        }
+        for code in [
+            "fn f(n: u8) -> Arg {}",
+            "fn f(n: u8) -> Result<Vec<u8>, Arg> {}",
+            "fn f(rows: &[Arg]) {}",
+            "fn f(rows: [Arg; 4]) {}",
+            "fn f(rows: Vec<Vec<Arg>>) {}",
+            "fn f(by: std::collections::HashMap<u8, Arg>) {}",
+            "fn f<T: Into<Arg>>(n: T) {}",
+            "fn f(n: u8) { let arg: Arg = make(); }",
+        ] {
+            assert!(!taken(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_is_called_when_parentheses_follow_it_or_its_turbofish() {
+        let called = |code: &str| {
+            let source = Source::new(code.to_owned());
+            let column = u32::try_from(code.find("run").expect("the code names run")).unwrap();
+            let name = Range {
+                start: at(0, column),
+                end: at(0, column + 3),
+            };
+            source.written(name, None).called
+        };
+        for code in ["run(1)", "self.run(1)", "m::run::<u8, Vec<u8>>(1)"] {
+            assert!(called(code), "{code}");
+        }
+        for code in ["post(run)", "items.map(Self::run)", "let f = run;"] {
+            assert!(!called(code), "{code}");
+        }
     }
 }

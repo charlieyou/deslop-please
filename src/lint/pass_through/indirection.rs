@@ -9,8 +9,10 @@
 //!   `[rename-getter] all-private-fields` reports every one, also a
 //!   read-only accessor of a field its type maintains.
 //! - `one-use-args`: a struct built at one place, in the one function that
-//!   passes it to another, which alone reads it: a parameter list moved
-//!   into a type.
+//!   calls another with it, which takes it as a parameter and alone reads
+//!   it: a parameter list moved into a type. A value a function returns, an
+//!   element of a list a function takes, and a value that the builder hands
+//!   to other code along with a function it only names are none.
 //! - `inner-split`: a private function, not recursive, called only by one
 //!   other function, not generic, whose body is that one call: `run` and
 //!   `run_inner`, one function split in two.
@@ -28,7 +30,9 @@ use crate::lint::{
     Diagnostic, EncapsulationLint, Lint, Location, Picture, clickable, in_scope, item_location,
     without_generics,
 };
-use crate::model::{FileId, ItemId, ItemKind, Model, NodeId, Reexport, Visibility, Wrapper};
+use crate::model::{
+    FileId, ItemId, ItemKind, Model, NodeId, Reexport, Reference, Visibility, Wrapper,
+};
 use crate::workspace::TargetKind;
 
 pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnostic> {
@@ -248,9 +252,13 @@ fn needless(model: &Model, getter: ItemId, field: ItemId, callers: &[Caller]) ->
     })
 }
 
-/// The items whose definitions hold each reference to `items`, by item.
-fn holders(model: &Model, items: &HashSet<ItemId>) -> HashMap<ItemId, Vec<(ItemId, bool)>> {
-    let mut found: HashMap<ItemId, Vec<(ItemId, bool)>> = HashMap::new();
+/// The references to `items` that definitions hold, each with its holder,
+/// by item.
+fn holders<'m>(
+    model: &'m Model,
+    items: &HashSet<ItemId>,
+) -> HashMap<ItemId, Vec<(ItemId, &'m Reference)>> {
+    let mut found: HashMap<ItemId, Vec<(ItemId, &Reference)>> = HashMap::new();
     for reference in &model.references {
         if items.contains(&reference.item)
             && let Some(holder) = reference.holder
@@ -258,7 +266,7 @@ fn holders(model: &Model, items: &HashSet<ItemId>) -> HashMap<ItemId, Vec<(ItemI
             found
                 .entry(reference.item)
                 .or_default()
-                .push((holder, reference.in_signature));
+                .push((holder, reference));
         }
     }
     found
@@ -295,20 +303,10 @@ fn one_use_args(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diag
     let all_fields: HashSet<ItemId> = structs.iter().flat_map(|ty| fields[ty].clone()).collect();
     let uses = holders(model, &structs);
     let field_uses = holders(model, &all_fields);
-    let calls = holders(
-        model,
-        &model
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.kind == ItemKind::Function)
-            .map(|(index, _)| ItemId::new(index))
-            .collect(),
-    );
     let mut diagnostics = Vec::new();
     for &ty in fields.keys().filter(|ty| structs.contains(ty)) {
         let own = |holder: ItemId| holder == ty || model.items[holder.index()].parent == Some(ty);
-        let by: Vec<(ItemId, bool)> = uses
+        let by: Vec<(ItemId, &Reference)> = uses
             .get(&ty)
             .into_iter()
             .flatten()
@@ -316,7 +314,11 @@ fn one_use_args(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diag
             .filter(|&(holder, _)| !own(holder))
             .collect();
         // The callee names it in its signature, the caller once in its body.
-        let callees: HashSet<ItemId> = by.iter().filter(|u| u.1).map(|u| u.0).collect();
+        let callees: HashSet<ItemId> = by
+            .iter()
+            .filter(|u| u.1.in_signature)
+            .map(|u| u.0)
+            .collect();
         let builders: Vec<ItemId> = by
             .iter()
             .filter(|u| !callees.contains(&u.0))
@@ -328,12 +330,18 @@ fn one_use_args(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diag
         ) else {
             continue;
         };
+        // The callee takes it as a parameter: a function that returns it
+        // gives back a value, and one that takes a list of them takes
+        // elements, neither of them arguments.
+        let takes = by.iter().any(|u| u.0 == *callee && u.1.taken);
         let functions = [callee, builder]
             .iter()
             .all(|f| model.items[f.index()].kind == ItemKind::Function);
-        let called = calls
-            .get(callee)
-            .is_some_and(|callers| callers.iter().any(|&(caller, _)| caller == *builder));
+        // The builder calls the callee: one it only names, as a function
+        // value handed on to other code, is called by that code instead.
+        let called = model.references.iter().any(|reference| {
+            reference.item == *callee && reference.holder == Some(*builder) && reference.called
+        });
         let read_there = fields[&ty].iter().all(|field| {
             field_uses
                 .get(field)
@@ -349,7 +357,7 @@ fn one_use_args(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diag
                 .get(field)
                 .is_some_and(|uses| uses.iter().any(|&(holder, _)| holder == *builder))
         });
-        if !functions || !called || !read_there || !built {
+        if !takes || !functions || !called || !read_there || !built {
             continue;
         }
         let (key, home) = key(model, graph, ty);

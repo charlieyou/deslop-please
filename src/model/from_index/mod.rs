@@ -907,6 +907,8 @@ impl<'a> Builder<'a> {
             in_signature: false,
             struct_update: false,
             chained: false,
+            taken: false,
+            called: false,
         });
         self.sites.push(Site {
             access,
@@ -932,6 +934,8 @@ impl<'a> Builder<'a> {
             reference.in_signature = written.in_signature;
             reference.struct_update = written.struct_update && names_type;
             reference.chained = written.chained;
+            reference.taken = written.taken;
+            reference.called = written.called;
         }
     }
 

@@ -1216,6 +1216,18 @@ pub mod plan {
     pub struct Zeroed { pub depth: u32 }
     fn deep(zeroed: Zeroed) -> u32 { zeroed.depth * 2 }
     pub fn zeroed() -> u32 { let z: Zeroed = unsafe { std::mem::zeroed() }; deep(z) }
+    pub struct Lent { pub depth: u32, pub width: u32 }
+    fn spread<const N: u32>(lent: Option<&Lent>) -> u32 { lent.map_or(0, |l| l.depth * l.width) * N }
+    pub fn spread_two() -> u32 { spread::<2>(Some(&Lent { depth: 1, width: 3 })) }
+    pub struct Shape { pub depth: u32, pub width: u32 }
+    fn shape_of(depth: u32) -> Shape { Shape { depth, width: depth * 2 } }
+    pub fn area(n: u32) -> u32 { let Shape { depth, width } = shape_of(n); depth * width }
+    pub struct Row { pub depth: u32, pub width: u32 }
+    fn total(rows: &[Row]) -> u32 { rows.iter().map(|row| row.depth * row.width).sum() }
+    pub fn table() -> u32 { total(&[Row { depth: 1, width: 2 }]) }
+    pub struct Service { pub depth: u32, pub width: u32 }
+    fn handle(service: Service) -> u32 { service.depth + service.width }
+    pub fn router(depth: u32) -> u32 { dep::serve(handle, Service { depth, width: 4 }) }
 }
 mod hidden { pub struct Facade; pub struct Twice; }
 pub mod open { pub struct Open; }
@@ -1242,7 +1254,11 @@ pub mod gpu { pub use dep::Remote; }
                 "dep/Cargo.toml",
                 "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
             ),
-            ("dep/src/lib.rs", "//! Dep.\npub struct Remote;\n"),
+            (
+                "dep/src/lib.rs",
+                "//! Dep.\npub struct Remote;\n\
+                 pub fn serve<T>(handler: fn(T) -> u32, state: T) -> u32 { handler(state) }\n",
+            ),
         ],
     );
     let opted = |keys: Vec<String>| -> Vec<String> {
@@ -1267,7 +1283,9 @@ pub mod gpu { pub use dep::Remote; }
     )
     .unwrap();
     // A getter with an argument or one that computes or locks, a struct
-    // built twice, not by a literal or deserialized, a recursive inner function and a
+    // built twice, not by a literal or deserialized, one a function returns
+    // (`Shape`), one a function takes a slice of (`Row`), one handed to
+    // another crate with the function it is for (`Service`), a recursive inner function and a
     // caller that calls more, computes its argument, reads a file, is generic or is another type's
     // method, `Probe::depth` calling its field's, stay quiet, as do a
     // private module's re-export and the shallowest second path, unless it
@@ -1280,6 +1298,7 @@ pub mod gpu { pub use dep::Remote; }
             "inner-split shims::plan::Run::step_at",
             "inner-split shims::plan::solve_inner",
             "one-use-args shims::plan::Args",
+            "one-use-args shims::plan::Lent",
             "redundant-reexport shims::Open",
             "redundant-reexport shims::Template",
             "redundant-reexport shims::api::Open",
